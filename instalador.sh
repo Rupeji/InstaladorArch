@@ -33,7 +33,7 @@ echo "---------------------------------------------------------"
 
 # Se instala openssh junto con el resto de herramientas esenciales
 pacman -Sy --noconfirm
-pacman -S --needed --noconfirm git curl lsblk docker docker-compose neofetch nano openssh
+pacman -S --needed --noconfirm git curl linux-util docker docker-compose fasfetch nano openssh
 
 echo "[-] Configurando e iniciando los servicios del sistema..."
 # Inicia y habilita Docker
@@ -168,4 +168,4 @@ echo "    Punto de montaje del almacenamiento: $MOUNT_POINT"
 echo "    Servicio SSH: Activo y configurado para acceso Root (Puerto: 22)"
 echo "    Aviso: Recuerda redirigir el DNS de tus consolas/PC a la IP $LANCACHE_IP"
 echo "========================================================="
-neofetch
+fastfetch
