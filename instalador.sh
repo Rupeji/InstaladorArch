@@ -33,7 +33,7 @@ echo "---------------------------------------------------------"
 
 # Se instala openssh junto con el resto de herramientas esenciales
 pacman -Sy --noconfirm
-pacman -S --needed --noconfirm git curl linux-util docker docker-compose fasfetch nano openssh
+pacman -S --needed --noconfirm git curl util-linux docker docker-compose fasfetch nano openssh
 
 echo "[-] Configurando e iniciando los servicios del sistema..."
 # Inicia y habilita Docker
