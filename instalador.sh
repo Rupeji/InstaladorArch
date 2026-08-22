@@ -31,7 +31,7 @@ echo ""
 echo "[-] Actualizando repositorios e instalando paquetes necesarios..."
 echo "---------------------------------------------------------"
 
-# Se añade openssh a la lista de paquetes esenciales de Arch Linux
+# Se instala openssh junto con el resto de herramientas esenciales
 pacman -Sy --noconfirm
 pacman -S --needed --noconfirm git curl lsblk docker docker-compose neofetch nano openssh
 
@@ -39,9 +39,21 @@ echo "[-] Configurando e iniciando los servicios del sistema..."
 # Inicia y habilita Docker
 systemctl enable --now docker
 
-# Inicia y habilita el servidor SSH (sshd) de forma automática
+# Inicia y habilita el servidor SSH (sshd)
 echo "[-] Habilitando el servidor OpenSSH para conexiones remotas..."
 systemctl enable --now sshd
+
+# Configuración automática para permitir el acceso SSH al usuario root con contraseña
+echo "[-] Configurando permisos de OpenSSH para permitir el acceso SSH a Root..."
+sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
+sed -i 's/PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
+# Por si la directiva estaba comentada de otra forma o no existía, aseguramos su presencia
+if ! grep -q "^PermitRootLogin yes" /etc/ssh/sshd_config; then
+    echo "PermitRootLogin yes" >> /etc/ssh/sshd_config
+fi
+
+# Reiniciar el servicio SSH para aplicar la nueva directiva de acceso root
+systemctl restart sshd
 echo "---------------------------------------------------------"
 
 # Variables de Red fijas
@@ -153,7 +165,7 @@ echo "========================================================="
 echo "[+] ¡El proceso de instalación ha finalizado de forma correcta!"
 echo "    Dirección IP fija asignada a LanCache: $LANCACHE_IP"
 echo "    Punto de montaje del almacenamiento: $MOUNT_POINT"
-echo "    Servicio SSH: Activo (Puerto por defecto: 22)"
+echo "    Servicio SSH: Activo y configurado para acceso Root (Puerto: 22)"
 echo "    Aviso: Recuerda redirigir el DNS de tus consolas/PC a la IP $LANCACHE_IP"
 echo "========================================================="
 neofetch
