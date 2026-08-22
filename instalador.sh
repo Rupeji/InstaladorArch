@@ -34,7 +34,7 @@ echo "---------------------------------------------------------"
 
 # Actualizar e instalar dependencias principales de forma desatendida (excluyendo wget)
 pacman -Sy --noconfirm
-pacman -S --needed --noconfirm git curl lsblk docker docker-compose
+pacman -S --needed --noconfirm wget nano neofetch curl lsblk docker docker-compose
 
 echo "[-] Configurando e iniciando el servicio de Docker..."
 systemctl enable --now docker
