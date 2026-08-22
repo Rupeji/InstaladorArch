@@ -1,4 +1,4 @@
-#!/bin/bash
+bash#!/bin/bash
 
 # Evitar que el script continúe si hay un error
 set -e
@@ -7,6 +7,39 @@ echo "========================================================="
 echo " Instalador Automatizado: Red Estática + Selección de Disco + LanCache "
 echo "========================================================="
 
+# ==========================================
+# 0. COMPROBACIÓN DE PRIVILEGIOS
+# ==========================================
+if [ "$EUID" -ne 0 ]; then
+    echo "[-] Este script necesita permisos de administrador (root)."
+    if command -v sudo >/dev/null 2>&1; then
+        echo "[-] Solicitando privilegios mediante sudo..."
+        # Ejecuta el script de nuevo usando sudo, manteniendo los argumentos si los hubiera
+        exec sudo "$0" "$@"
+    else
+        echo "[!] Error: Este script requiere permisos de root y 'sudo' no está instalado."
+        echo "    Por favor, ejecuta el script directamente como root o instala sudo."
+        exit 1
+    fi
+fi
+
+echo "[-] Privilegios de administrador verificados correctamente."
+
+# ==========================================
+# 0.1 INSTALACIÓN DE DEPENDENCIAS NECESARIAS
+# ==========================================
+echo ""
+echo "[-] Actualizando repositorios e instalando paquetes necesarios..."
+echo "---------------------------------------------------------"
+
+# Actualizar e instalar dependencias principales de forma desatendida (excluyendo wget)
+pacman -Sy --noconfirm
+pacman -S --needed --noconfirm git curl lsblk docker docker-compose
+
+echo "[-] Configurando e iniciando el servicio de Docker..."
+systemctl enable --now docker
+echo "---------------------------------------------------------"
+
 # Variables de Red fijas
 LANCACHE_IP="192.168.0.7"
 NETMASK_SHORT="24" # Equivale a 255.255.255.0
@@ -14,7 +47,7 @@ NETMASK_SHORT="24" # Equivale a 255.255.255.0
 # NOTA: Esta es la IP de la puerta de enlace (tu router local)
 GATEWAY="192.168.0.1" 
 
-DNS_PROVISIONAL="1.1.1.1" # DNS temporal para descargar Docker e imágenes
+DNS_PROVISIONAL="1.1.1.1" # DNS temporal para descargar las imágenes de Docker
 
 # ==========================================
 # 1. SELECCIÓN DE DISCO DURO PARA LOS JUEGOS
@@ -81,16 +114,16 @@ if systemctl is-active --quiet NetworkManager; then
     NM_CONN=$(nmcli -g GENERAL.CONNECTION device show "$INTERFACE" | head -n1)
     if [ -z "$NM_CONN" ]; then NM_CONN="$INTERFACE"; fi
     
-    sudo nmcli connection modify "$NM_CONN" ipv4.addresses "${LANCACHE_IP}/${NETMASK_SHORT}"
-    sudo nmcli connection modify "$NM_CONN" ipv4.gateway "${GATEWAY}"
-    sudo nmcli connection modify "$NM_CONN" ipv4.dns "${DNS_PROVISIONAL}"
-    sudo nmcli connection modify "$NM_CONN" ipv4.method manual
-    sudo nmcli connection up "$NM_CONN"
+    nmcli connection modify "$NM_CONN" ipv4.addresses "${LANCACHE_IP}/${NETMASK_SHORT}"
+    nmcli connection modify "$NM_CONN" ipv4.gateway "${GATEWAY}"
+    nmcli connection modify "$NM_CONN" ipv4.dns "${DNS_PROVISIONAL}"
+    nmcli connection modify "$NM_CONN" ipv4.method manual
+    nmcli connection up "$NM_CONN"
 
 elif systemctl is-active --quiet systemd-networkd; then
     echo "[-] Detectado: systemd-networkd activo. Configurando IP estática..."
-    sudo mkdir -p /etc/systemd/network
-    cat << EOF | sudo tee /etc/systemd/network/10-${INTERFACE}.network > /dev/null
+    mkdir -p /etc/systemd/network
+    cat << EOF | tee /etc/systemd/network/10-${INTERFACE}.network > /dev/null
 [Match]
 Name=${INTERFACE}
 
@@ -99,11 +132,11 @@ Address=${LANCACHE_IP}/${NETMASK_SHORT}
 Gateway=${GATEWAY}
 DNS=${DNS_PROVISIONAL}
 EOF
-    sudo systemctl restart systemd-networkd
+    systemctl restart systemd-networkd
 else
     echo "[!] ADVERTENCIA: No se detectó NetworkManager ni systemd-networkd activo."
-    sudo ip addr add ${LANCACHE_IP}/${NETMASK_SHORT} dev ${INTERFACE} 2>/dev/null || true
-    sudo ip route add default via ${GATEWAY} dev ${INTERFACE} 2>/dev/null || true
+    ip addr add ${LANCACHE_IP}/${NETMASK_SHORT} dev ${INTERFACE} 2>/dev/null || true
+    ip route add default via ${GATEWAY} dev ${INTERFACE} 2>/dev/null || true
 fi
 
 # ==========================================
@@ -111,9 +144,9 @@ fi
 # ==========================================
 if systemctl is-active --quiet systemd-resolved; then
     echo "[-] Desactivando el stub de DNS de systemd-resolved..."
-    sudo mkdir -p /etc/systemd/resolved.conf.d/
-    echo -e "[Resolve]\nDNSStubListener=no" | sudo tee /etc/systemd/resolved.conf.d/lancache.conf > /dev/null
-    sudo systemctl restart systemd-resolved
+    mkdir -p /etc/systemd/resolved.conf.d/
+    echo -e "[Resolve]\nDNSStubListener=no" | tee /etc/systemd/resolved.conf.d/lancache.conf > /dev/null
+    systemctl restart systemd-resolved
 fi
 
 # ==========================================
@@ -188,21 +221,21 @@ services:
       - lancache
 EOF
 
-sudo chown -R 1000:1000 lancache/logs 2>/dev/null || true
+chown -R 1000:1000 lancache/logs 2>/dev/null || true
 
 # ==========================================
 # 5. INICIAR CONTENEDORES Y AJUSTAR DNS FINAL
 # ==========================================
 echo "[-] Descargando e iniciando servicios en Docker..."
-sudo docker-compose up -d
+docker-compose up -d
 
 echo "[-] Redirigiendo el DNS de este servidor al Pi-hole local..."
 if systemctl is-active --quiet NetworkManager; then
-    sudo nmcli connection modify "$NM_CONN" ipv4.dns "127.0.0.1"
-    sudo nmcli connection up "$NM_CONN" > /dev/null
+    nmcli connection modify "$NM_CONN" ipv4.dns "127.0.0.1"
+    nmcli connection up "$NM_CONN" > /dev/null
 elif systemctl is-active --quiet systemd-networkd; then
-    sudo sed -i 's/DNS=.*/DNS=127.0.0.1/' /etc/systemd/network/10-${INTERFACE}.network
-    sudo systemctl restart systemd-networkd
+    sed -i 's/DNS=.*/DNS=127.0.0.1/' /etc/systemd/network/10-${INTERFACE}.network
+    systemctl restart systemd-networkd
 fi
 
 echo "========================================================="
