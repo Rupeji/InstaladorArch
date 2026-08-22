@@ -1,4 +1,4 @@
-bash#!/bin/bash
+#!/bin/bash
 
 # Evitar que el script continúe si hay un error
 set -e
@@ -32,9 +32,9 @@ echo ""
 echo "[-] Actualizando repositorios e instalando paquetes necesarios..."
 echo "---------------------------------------------------------"
 
-# Actualizar e instalar dependencias principales de forma desatendida (excluyendo wget)
+# Actualizar e instalar dependencias principales de forma desatendida (incluyendo neofetch y nano)
 pacman -Sy --noconfirm
-pacman -S --needed --noconfirm wget nano neofetch curl lsblk docker docker-compose
+pacman -S --needed --noconfirm git curl lsblk docker docker-compose neofetch nano
 
 echo "[-] Configurando e iniciando el servicio de Docker..."
 systemctl enable --now docker
