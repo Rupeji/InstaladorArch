@@ -4,7 +4,7 @@
 set -e
 
 echo "========================================================================="
-echo "  INSTALADOR TODO EN UNO: LANCACHE + PI-HOLE + GESTIÓN DE DISCO (ARCH)   "
+echo "  INSTALADOR TODO EN UNO DEFINITIVO: LANCACHE + PI-HOLE (ARCH LINUX)    "
 echo "========================================================================="
 
 # =======================================================================
@@ -45,7 +45,8 @@ echo ""
 echo "[-] Sincronizando repositorios e instalando paquetes requeridos..."
 echo "--------------------------------------------------------------------------"
 pacman -Sy --noconfirm
-pacman -S --needed --noconfirm git curl util-linux docker docker-compose fastfetch nano openssh e2fsprogs
+# Añadimos ntfs-3g por si tu disco formateado proviene de sistemas Windows
+pacman -S --needed --noconfirm git curl util-linux docker docker-compose fastfetch nano openssh e2fsprogs ntfs-3g
 
 echo "[-] Activando servicios Docker y SSH..."
 systemctl enable --now docker
@@ -72,6 +73,7 @@ if [ -z "$INTERFACE" ]; then
 fi
 echo "[+] Interfaz física activa: $INTERFACE"
 
+# Nota: Si ejecutas esto por SSH, tu IP cambiará a 192.168.0.7. Tendrás que reconectarte a esa IP.
 if systemctl is-active --quiet NetworkManager; then
     echo "[+] Configurando IP fija mediante NetworkManager..."
     NM_CONN=$(nmcli -t -f DEVICE,NAME connection show --active | grep "^${INTERFACE}:" | cut -d: -f2 | head -n 1)
@@ -107,9 +109,13 @@ static domain_name_servers=$DNS_PROVISIONAL
 EOF
     systemctl restart dhcpcd
 else
-    echo "[!] Gestor no detectado. Aplicando IP provisional por comando ip..."
+    echo "[!] Gestor no detectado. Applying IP provisional por comando ip..."
     ip addr add "$SERVER_IP/$NETMASK_SHORT" dev "$INTERFACE" || true
 fi
+
+# Esperar unos segundos para garantizar que la interfaz de red se estabilice con la nueva IP
+echo "[-] Esperando estabilización de red..."
+sleep 3
 
 # =======================================================================
 # 5. ASISTENTE INTERACTIVO DE ALMACENAMIENTO (SIN FORMATEAR)
@@ -135,13 +141,12 @@ if [ -n "$CURRENT_MOUNT" ]; then
     umount -l "$TARGET_DEV" || true
 fi
 
-# Auto-detectar el sistema de archivos actual y su UUID (Sin alterar la información existente)
+# Auto-detectar el sistema de archivos actual y su UUID
 FS_TYPE=$(blkid -o value -s TYPE "$TARGET_DEV" || lsblk -no FSTYPE "$TARGET_DEV")
 DISK_UUID=$(blkid -o value -s UUID "$TARGET_DEV" || lsblk -no UUID "$TARGET_DEV")
 
 if [ -z "$FS_TYPE" ] || [ -z "$DISK_UUID" ]; then
     echo "[!] Error: No se pudo identificar un sistema de archivos o UUID válido en $TARGET_DEV."
-    echo "[!] Asegúrate de que la unidad tenga formato antes de lanzar el script."
     exit 1
 fi
 
@@ -151,7 +156,7 @@ echo "[+] UUID detectado: $DISK_UUID"
 echo "[-] Configurando montaje persistente mediante UUID..."
 mkdir -p "$MOUNT_POINT"
 
-# Evitar duplicados eliminando registros antiguos del archivo fstab relacionados con este punto o UUID
+# Evitar duplicados eliminando registros antiguos del archivo fstab
 sed -i "\|UUID=$DISK_UUID|d" /etc/fstab
 sed -i "\|$MOUNT_POINT|d" /etc/fstab
 
@@ -185,7 +190,17 @@ chmod -R 777 "$MOUNT_POINT"
 echo "[+] Almacenamiento listo y montado con éxito en: $MOUNT_POINT"
 
 # =======================================================================
-# 6. CREACIÓN DEL ESCENARIO DOCKER COMPOSE INTEGRADO
+# 6. LIBERACIÓN DEL PUERTO 53 (EVITAR CONFLICTOS)
+# =======================================================================
+# Si systemd-resolved está corriendo, ocupará el puerto 53 e impedirá levantar el contenedor
+if systemctl is-active --quiet systemd-resolved; then
+    echo "[-] Detectado systemd-resolved ocupando el puerto 53 local. Desactivando..."
+    systemctl stop systemd-resolved
+    systemctl disable systemd-resolved
+fi
+
+# =======================================================================
+# 7. CREACIÓN DEL ESCENARIO DOCKER COMPOSE INTEGRADO
 # =======================================================================
 echo "[-] Generando el manifiesto actual docker-compose.yml..."
 mkdir -p "$DIR_BASE"
@@ -239,14 +254,20 @@ services:
 EOF
 
 # =======================================================================
-# 7. DESPLIEGUE Y DIRECCIONAMIENTO LOCAL
+# 8. DESPLIEGUE Y DIRECCIONAMIENTO LOCAL
 # =======================================================================
 echo ""
 echo "[-] Descargando imágenes y levantando los servicios..."
 echo "--------------------------------------------------------------------------"
-docker-compose up -d
+# Comprobación inteligente para ejecutar el binario correcto según la versión del sistema
+if docker compose version &> /dev/null; then
+    docker compose up -d
+else
+    docker-compose up -d
+fi
 
 echo ""
+
 echo "[-] Aplicando configuración DNS final en el Host local..."
 if [ -n "$INTERFACE" ]; then
     if systemctl is-active --quiet NetworkManager; then
