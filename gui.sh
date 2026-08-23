@@ -199,7 +199,7 @@ echo "=== PASO 5: DESPLIEGUE EN VIVO Y DESCARGA           ==="
 echo "======================================================="
 
 # Descargar y levantar la estructura (Escucharán temporalmente hasta el reinicio de red)
-sudo docker compose up -d
+sudo docker compose up --detach
 echo "--> Infraestructura de contenedores desplegada correctamente."
 
 echo ""
