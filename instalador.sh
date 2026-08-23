@@ -38,7 +38,7 @@ echo ""
 echo "[-] Actualizando repositorios e instalando paquetes esenciales..."
 echo "---------------------------------------------------------"
 pacman -Sy --noconfirm
-pacman -S --needed --noconfirm git curl util-linux docker docker-compose-v2 fastfetch nano openssh
+pacman -S --needed --noconfirm git curl util-linux docker docker-compose fastfetch nano openssh
 
 echo "[-] Activando e iniciando servicios de sistema..."
 systemctl enable --now docker
@@ -176,8 +176,9 @@ if ! mountpoint -q "$MOUNT_POINT"; then
 fi
 
 # AJUSTAR PROPIEDAD DE LA RAÍZ DEL DISCO MONTAJE (Vital para formatos Linux)
-# Asegura que el usuario actual y Docker puedan gestionar la estructura interna
-sudo chown -R $USER:$USER "$MOUNT_POINT"
+# Detecta el usuario real que invocó sudo en lugar de asignar root de forma ciega
+REAL_USER=$(logname 2>/dev/null || echo $USER)
+sudo chown -R "$REAL_USER":"$REAL_USER" "$MOUNT_POINT"
 
 CACHE_DATA_DIR="$MOUNT_POINT/data"
 CACHE_LOGS_DIR="$MOUNT_POINT/logs"
@@ -193,7 +194,6 @@ chmod -R 777 "$CACHE_DATA_DIR" "$CACHE_LOGS_DIR"
 sudo chmod -R 777 "/opt/pihole"
 
 echo "[+] Almacenamiento Linux preparado, montado y con permisos verificados en $MOUNT_POINT."
-
 
 # ==========================================
 # 5. CREACIÓN DEL ESCENARIO DOCKER COMPOSE
@@ -220,8 +220,7 @@ services:
     environment:
       TZ: 'Europe/Madrid'
       WEBPASSWORD: '${PASSWORD_PIHOLE}'
-      DNS1: '1.1.1.1'
-      DNS2: '8.8.8.8'
+      PIHOLE_DNS_: '1.1.1.1;8.8.8.8'
       INTERFACE: 'eth0'
     volumes:
       - '${PIHOLE_DATA_DIR}:/etc/pihole'
@@ -267,25 +266,8 @@ echo ""
 echo "[-] Aplicando configuración DNS final en el Host local..."
 if [ -n "$INTERFACE" ]; then
     if systemctl is-active --quiet NetworkManager; then
-        nmcli connection modify "$NM_CONN" ipv4.dns "$LANCACHE_IP"
-        nmcli connection up "$NM_CONN"
-    elif systemctl is-active --quiet systemd-networkd; then
-        sed -i "s/DNS=$DNS_PROVISIONAL/DNS=$LANCACHE_IP/" "$NET_FILE"
-        systemctl restart systemd-networkd
-    elif systemctl is-active --quiet dhcpcd; then
-        sed -i "s/static domain_name_servers=$DNS_PROVISIONAL/static domain_name_servers=$LANCACHE_IP/" /etc/dhcpcd.conf
-        systemctl restart dhcpcd
-    fi
-fi
-
-echo ""
-echo "========================================================="
-echo "[+] ¡INSTALACIÓN COMPLETADA EXITOSAMENTE!"
-echo "    -> Servidor LanCache IP: $LANCACHE_IP"
-echo "    -> Servidor Pi-hole IP:  $PIHOLE_IP"
-echo "    -> Contraseña de Pi-hole: $PASSWORD_PIHOLE"
-echo ""
-echo "    [NOTA] Configura tus ordenadores y consolas para que usen"
-echo "    ÚNICAMENTE la IP DNS: $LANCACHE_IP"
-echo "========================================================="
-fastfetch
+        NM_CONN=$(nmcli -t -f DEVICE,NAME connection show --active | grep "^${INTERFACE}:" | cut -d: -f2 | head -n 1)
+        if [ -n "$NM_CONN" ]; then
+            nmcli connection modify "$NM_CONN" ipv4.dns "$LANCACHE_IP"
+            nmcli connection up "$NM_CONN"
+        fi
