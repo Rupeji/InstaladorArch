@@ -1,51 +1,50 @@
 #!/bin/bash
 
-# Evitar que el script continúe si hay un error crítico
+# Evitar que el script continúe si ocurre cualquier error crítico
 set -e
 
 echo "========================================================="
-echo " Instalador Automatizado: Red Estática + Selección de Disco + LanCache + SSH "
+echo " Instalador Todo en Uno: IP Estática + Alias + LanCache + Pi-hole "
 echo "========================================================="
 
 # ==========================================
 # 0. COMPROBACIÓN DE PRIVILEGIOS
 # ==========================================
 if [ "$EUID" -ne 0 ]; then
-    echo "[-] Este script necesita permisos de administrador (root)."
+    echo "[!] Este script necesita permisos de administrador (root)."
     if command -v sudo >/dev/null 2>&1; then
         echo "[-] Solicitando privilegios mediante sudo..."
         exec sudo "$0" "$@"
     else
-        echo "[!] Error: Este script requiere permisos de root y 'sudo' no está instalado."
-        echo "    Por favor, ejecuta el script directamente como root o instala sudo."
+        echo "[!] Error: No se detectó 'sudo'. Ejecuta el script directamente como root."
         exit 1
     fi
 fi
 
-echo "[-] Privilegios de administrador verificados correctamente."
-
-# Variables de Red fijas
-LANCACHE_IP="192.168.0.7"
-NETMASK_SHORT="24" 
-GATEWAY="192.168.0.1" 
-DNS_PROVISIONAL="1.1.1.1" # Mantenido obligatoriamente en el OS hasta que Docker esté activo
+# ==========================================
+# 1. VARIABLES DE CONFIGURACIÓN
+# ==========================================
+LANCACHE_IP="192.168.0.7"   # IP principal para el servidor y LanCache
+PIHOLE_IP="192.168.0.8"     # IP secundaria/virtual asignada a Pi-hole
+NETMASK_SHORT="24"          # Máscara /24 (255.255.255.0)
+GATEWAY="192.168.0.1"       # IP de tu router
+DNS_PROVISIONAL="1.1.1.1"   # DNS externo para descargar los paquetes iniciales
+PASSWORD_PIHOLE="TuContraseñaSegura123" # Cambia esto para tu panel de Pi-hole
 
 # ==========================================
-# 0.1 INSTALACIÓN DE DEPENDENCIAS NECESARIAS
+# 2. INSTALACIÓN DE DEPENDENCIAS
 # ==========================================
 echo ""
-echo "[-] Actualizando repositorios e instalando paquetes necesarios..."
+echo "[-] Actualizando repositorios e instalando paquetes esenciales..."
 echo "---------------------------------------------------------"
-
 pacman -Sy --noconfirm
-# Corregido: Se instala docker-compose-v2 para el soporte nativo moderno de Arch Linux
 pacman -S --needed --noconfirm git curl util-linux docker docker-compose-v2 fastfetch nano openssh
 
-echo "[-] Configurando e iniciando los servicios del sistema..."
+echo "[-] Activando e iniciando servicios de sistema..."
 systemctl enable --now docker
 systemctl enable --now sshd
 
-echo "[-] Configurando permisos de OpenSSH para permitir el acceso SSH a Root..."
+# Permitir SSH Root por conveniencia en servidores locales
 sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
 sed -i 's/PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
 if ! grep -q "^PermitRootLogin yes" /etc/ssh/sshd_config; then
@@ -54,83 +53,80 @@ fi
 systemctl restart sshd
 
 # ==========================================
-# 0.2 CONFIGURACIÓN INTELIGENTE DE IP ESTÁTICA
+# 3. RED ESTÁTICA + IP VIRTUAL (ALIAS)
 # ==========================================
-echo "---------------------------------------------------------"
-echo "[-] Detectando gestor de red activo para aplicar IP estática..."
-
+echo ""
+echo "[-] Detectando gestor de red activo..."
 INTERFACE=$(ip route | grep default | awk '{print $5}' | head -n 1)
 
 if [ -z "$INTERFACE" ]; then
-    echo "[!] Advertencia: No se detectó ninguna interfaz de red activa con salida a internet."
-    echo "    Se omitirá la configuración automática de IP estática."
-else
-    echo "[+] Interfaz de red detectada: $INTERFACE"
-    
-    # 1. Configuración para NetworkManager
-    if systemctl is-active --quiet NetworkManager; then
-        echo "[+] Detectado NetworkManager activo. Configurando IP estática..."
-        NM_CONN=$(nmcli -t -f DEVICE,NAME connection show --active | grep "^${INTERFACE}:" | cut -d: -f2)
-        if [ -n "$NM_CONN" ]; then
-            nmcli connection modify "$NM_CONN" ipv4.addresses "$LANCACHE_IP/$NETMASK_SHORT"
-            nmcli connection modify "$NM_CONN" ipv4.gateway "$GATEWAY"
-            nmcli connection modify "$NM_CONN" ipv4.dns "$DNS_PROVISIONAL" # Mantiene internet para Docker
-            nmcli connection modify "$NM_CONN" ipv4.method manual
-            nmcli connection up "$NM_CONN"
-            echo "[+] NetworkManager configurado correctamente."
-        else
-            echo "[!] No se pudo mapear la interfaz a una conexión de NetworkManager."
-        fi
+    echo "[!] Error crítico: No se detectó una interfaz con salida a internet."
+    exit 1
+fi
 
-    # 2. Configuración para systemd-networkd
-    elif systemctl is-active --quiet systemd-networkd; then
-        echo "[+] Detectado systemd-networkd activo. Configurando IP estática..."
-        NET_FILE="/etc/systemd/network/10-static-en.network"
-        cat <<EOF > "$NET_FILE"
+echo "[+] Interfaz física activa: $INTERFACE"
+
+if systemctl is-active --quiet NetworkManager; then
+    echo "[+] Configurando IPs en NetworkManager..."
+    NM_CONN=$(nmcli -t -f DEVICE,NAME connection show --active | grep "^${INTERFACE}:" | cut -d: -f2)
+    if [ -n "$NM_CONN" ]; then
+        # Asignamos AMBAS IPs a la misma interfaz física
+        nmcli connection modify "$NM_CONN" ipv4.addresses "$LANCACHE_IP/$NETMASK_SHORT,$PIHOLE_IP/$NETMASK_SHORT"
+        nmcli connection modify "$NM_CONN" ipv4.gateway "$GATEWAY"
+        nmcli connection modify "$NM_CONN" ipv4.dns "$DNS_PROVISIONAL"
+        nmcli connection modify "$NM_CONN" ipv4.method manual
+        nmcli connection up "$NM_CONN"
+    else
+        echo "[!] Falló el mapeo en NetworkManager. Se intentará forzar por comando 'ip'."
+        ip addr add "$LANCACHE_IP/$NETMASK_SHORT" dev "$INTERFACE" || true
+        ip addr add "$PIHOLE_IP/$NETMASK_SHORT" dev "$INTERFACE" || true
+    fi
+
+elif systemctl is-active --quiet systemd-networkd; then
+    echo "[+] Configurando IPs en systemd-networkd..."
+    NET_FILE="/etc/systemd/network/10-static-en.network"
+    cat <<EOF > "$NET_FILE"
 [Match]
 Name=$INTERFACE
 
 [Network]
 Address=$LANCACHE_IP/$NETMASK_SHORT
+Address=$PIHOLE_IP/$NETMASK_SHORT
 Gateway=$GATEWAY
 DNS=$DNS_PROVISIONAL
 EOF
-        systemctl restart systemd-networkd
-        echo "[+] systemd-networkd configurado correctamente."
+    systemctl restart systemd-networkd
 
-    # 3. Configuración para dhcpcd
-    elif systemctl is-active --quiet dhcpcd; then
-        echo "[+] Detectado dhcpcd activo. Configurando IP estática..."
-        sed -i "/interface $INTERFACE/,+4d" /etc/dhcpcd.conf
-        cat <<EOF >> /etc/dhcpcd.conf
+elif systemctl is-active --quiet dhcpcd; then
+    echo "[+] Configurando IPs en dhcpcd..."
+    sed -i "/interface $INTERFACE/,+5d" /etc/dhcpcd.conf
+    cat <<EOF >> /etc/dhcpcd.conf
 
 interface $INTERFACE
 static ip_address=$LANCACHE_IP/$NETMASK_SHORT
+static ip_address=$PIHOLE_IP/$NETMASK_SHORT
 static routers=$GATEWAY
 static domain_name_servers=$DNS_PROVISIONAL
 EOF
-        systemctl restart dhcpcd
-        echo "[+] dhcpcd configurado correctamente."
-    
-    else
-        echo "[!] No se detectó NetworkManager, systemd-networkd ni dhcpcd activo."
-    fi
+    systemctl restart dhcpcd
+else
+    echo "[!] No se reconoció un gestor activo. Aplicando IPs de forma volátil mediante comando ip..."
+    ip addr add "$LANCACHE_IP/$NETMASK_SHORT" dev "$INTERFACE" || true
+    ip addr add "$PIHOLE_IP/$NETMASK_SHORT" dev "$INTERFACE" || true
 fi
-echo "---------------------------------------------------------"
 
 # ==========================================
-# 1. SELECCIÓN DE DISCO DURO PARA LOS JUEGOS
+# 4. PREPARACIÓN DEL DISCO DE ALMACENAMIENTO
 # ==========================================
 echo ""
-echo "[?] Discos de almacenamiento disponibles en el sistema:"
+echo "[?] Discos de almacenamiento disponibles:"
 echo "---------------------------------------------------------"
 lsblk -n -o NAME,SIZE,FSTYPE,MODEL
 echo "---------------------------------------------------------"
-
-read -p "[>] Escribe el nombre exacto de la partición vacía formateada (ej. sdb1 o nvme1n1p1): " DISK_NAME
+read -p "[>] Escribe el nombre exacto de la partición para los juegos (ej. sdb1): " DISK_NAME
 
 if [ ! -b "/dev/$DISK_NAME" ]; then
-    echo "[!] Error crítico: El disco /dev/$DISK_NAME no es un dispositivo válido o no existe."
+    echo "[!] El dispositivo /dev/$DISK_NAME no existe."
     exit 1
 fi
 
@@ -141,87 +137,99 @@ DISK_UUID=$(blkid -o value -s UUID "/dev/$DISK_NAME")
 FS_TYPE=$(blkid -o value -s TYPE "/dev/$DISK_NAME")
 
 if [ -z "$DISK_UUID" ] || [ -z "$FS_TYPE" ]; then
-    echo "[!] Error: No se pudo leer el sistema de archivos de /dev/$DISK_NAME."
+    echo "[!] No se pudo leer un sistema de archivos válido en la partición."
     exit 1
 fi
 
-echo "[-] Añadiendo entrada persistente en /etc/fstab mediante UUID..."
 if ! grep -q "$DISK_UUID" /etc/fstab; then
     echo "UUID=$DISK_UUID $MOUNT_POINT $FS_TYPE defaults,noatime 0 2" >> /etc/fstab
 fi
 
-echo "[-] Asegurando el montaje de la unidad..."
-if mount | grep -q "$MOUNT_POINT"; then
-    echo "[-] La unidad ya se encontraba montada en $MOUNT_POINT."
-else
-    # Corregido: Evita que advertencias menores del sistema colapsen el script bajo 'set -e'
-    mount -a || true
-    if ! mount | grep -q "$MOUNT_POINT"; then
-        echo "[!] Error crítico: No se pudo montar la unidad en $MOUNT_POINT."
-        exit 1
-    fi
+echo "[-] Montando la unidad de almacenamiento..."
+mount -a || true
+if ! mount | grep -q "$MOUNT_POINT"; then
+    echo "[!] Error crítico: La unidad no se pudo montar."
+    exit 1
 fi
 
 CACHE_DATA_DIR="$MOUNT_POINT/data"
 CACHE_LOGS_DIR="$MOUNT_POINT/logs"
-mkdir -p "$CACHE_DATA_DIR" "$CACHE_LOGS_DIR"
+PIHOLE_DATA_DIR="/opt/pihole/config"
+PIHOLE_DNS_DIR="/opt/pihole/dnsmasq.d"
+
+mkdir -p "$CACHE_DATA_DIR" "$CACHE_LOGS_DIR" "$PIHOLE_DATA_DIR" "$PIHOLE_DNS_DIR"
 chmod -R 777 "$CACHE_DATA_DIR" "$CACHE_LOGS_DIR"
 
 # ==========================================
-# 2. CONFIGURACIÓN DEL ENTORNO LANCACHE
+# 5. CREACIÓN DEL ESCENARIO DOCKER COMPOSE
 # ==========================================
 echo ""
-echo "[-] Creando el directorio operativo de LanCache..."
-LANCACHE_DIR="/opt/lancache"
-mkdir -p "$LANCACHE_DIR"
-cd "$LANCACHE_DIR"
+echo "[-] Generando la infraestructura integrada en /opt/servicios..."
+mkdir -p /opt/servicios
+cd /opt/servicios
 
-echo "[-] Generando archivo docker-compose.yml con las variables de red..."
-cat << 'EOF' > docker-compose.yml
-version: '2'
+# Escribimos el docker-compose asignando de forma estricta los sockets a cada IP específica
+cat << EOF > docker-compose.yml
+version: '3.8'
 
 services:
-  dns:
+  # --- BLOQUE PI-HOLE (Escucha en la IP Virtual .8) ---
+  pihole:
+    container_name: pihole
+    image: pihole/pihole:latest
+    restart: always
+    ports:
+      - "${PIHOLE_IP}:53:53/udp"
+      - "${PIHOLE_IP}:53:53/tcp"
+      - "${PIHOLE_IP}:80:80/tcp"
+    environment:
+      TZ: 'Europe/Madrid'
+      WEBPASSWORD: '${PASSWORD_PIHOLE}'
+      DNS1: '1.1.1.1'
+      DNS2: '8.8.8.8'
+      INTERFACE: 'eth0'
+    volumes:
+      - '${PIHOLE_DATA_DIR}:/etc/pihole'
+      - '${PIHOLE_DNS_DIR}:/etc/dnsmasq.d'
+
+  # --- BLOQUE LANCACHE DNS (Escucha en la IP Principal .7 y sale por Pi-hole) ---
+  lancache-dns:
+    container_name: lancache-dns
     image: lancachenet/lancache-dns:latest
     restart: always
     ports:
-      - "192.168.0.7:53:53/udp"
-      - "192.168.0.7:53:53/tcp"
+      - "${LANCACHE_IP}:53:53/udp"
+      - "${LANCACHE_IP}:53:53/tcp"
     environment:
-      - LANCACHE_IP=192.168.0.7
-      - UPSTREAM_DNS=1.1.1.1
+      - LANCACHE_IP=${LANCACHE_IP}
+      - UPSTREAM_DNS=${PIHOLE_IP} # Redirige el tráfico limpio a Pi-hole
 
-  cache:
+  # --- BLOQUE LANCACHE MONOLITHIC (Escucha puertos Web en la IP Principal .7) ---
+  lancache-monolithic:
+    container_name: lancache-monolithic
     image: lancachenet/monolithic:latest
     restart: always
     ports:
-      - "192.168.0.7:80:80/tcp"
-      - "192.168.0.7:443:443/tcp"
+      - "${LANCACHE_IP}:80:80/tcp"
+      - "${LANCACHE_IP}:443:443/tcp"
     environment:
       - CACHE_DISK_SIZE=1000g
       - TZ=Europe/Madrid
     volumes:
-      - /mnt/lancache/data:/data/cache
-      - /mnt/lancache/logs:/data/logs
+      - ${CACHE_DATA_DIR}:/data/cache
+      - ${CACHE_LOGS_DIR}:/data/logs
 EOF
 
-echo "[+] Archivo docker-compose.yml creado con éxito."
-
 # ==========================================
-# 3. DESPLIEGUE AUTOMÁTICO DE LOS CONTENEDORES
+# 6. DESPLIEGUE Y CONFIGURACIÓN FINAL DEL HOST
 # ==========================================
 echo ""
-echo "[-] Descargando imágenes e iniciando LanCache mediante Docker Compose..."
+echo "[-] Levantando contenedores en Docker..."
 echo "---------------------------------------------------------"
-
-# Ahora Docker resolverá perfectamente las descargas porque la máquina conserva DNS real temporal externo
 docker compose up -d
 
-# ==========================================
-# 4. CAMBIO DE DNS FINAL (POST-INSTALACIÓN)
-# ==========================================
 echo ""
-echo "[-] Aplicando redirección definitiva de DNS interno en la máquina host..."
+echo "[-] Aplicando configuración DNS final en el Host local..."
 if [ -n "$INTERFACE" ]; then
     if systemctl is-active --quiet NetworkManager; then
         nmcli connection modify "$NM_CONN" ipv4.dns "$LANCACHE_IP"
@@ -237,10 +245,12 @@ fi
 
 echo ""
 echo "========================================================="
-echo "[+] ¡El proceso de instalación ha finalizado de forma correcta!"
-echo "    Dirección IP fija asignada a LanCache: $LANCACHE_IP"
-echo "    Punto de montaje del almacenamiento: $MOUNT_POINT"
-echo "    Servicio SSH: Activo y configurado para acceso Root (Puerto: 22)"
-echo "    Aviso: Recuerda redirigir el DNS de tus consolas/PC a la IP $LANCACHE_IP"
+echo "[+] ¡INSTALACIÓN COMPLETADA EXITOSAMENTE!"
+echo "    -> Servidor LanCache IP: $LANCACHE_IP"
+echo "    -> Servidor Pi-hole IP:  $PIHOLE_IP"
+echo "    -> Contraseña de Pi-hole: $PASSWORD_PIHOLE"
+echo ""
+echo "    [NOTA] Configura tus ordenadores y consolas para que usen"
+echo "    ÚNICAMENTE la IP DNS: $LANCACHE_IP"
 echo "========================================================="
 fastfetch
