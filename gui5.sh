@@ -3,7 +3,7 @@
 # Salir inmediatamente si un comando falla de forma imprevista
 set -e
 
-# Configuración de la IP asignada por DHCP estático en el Router para el Servidor y LanCache
+# Configuración de la IP asignada por DHCP estático en el Router para el Servidor y LanCache visualizar http://192.168.0.20:7302
 LANCACHE_IP="192.168.0.20"
 
 echo "======================================================="
