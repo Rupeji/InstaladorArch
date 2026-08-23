@@ -19,13 +19,15 @@ El instalador está diseñado y blindado específicamente para funcionar de mane
 
 ---
 
-## 💻 Instalación Rápida
+## 💻 Instalación
 
-Puedes ejecutar el instalador directamente desde tu servidor Arch Linux ejecutando el siguiente comando de una sola línea:
+Puedes ejecutar el instalador directamente desde tu servidor Arch Linux ejecutando los siguientes comandos:
 
-```bash
-curl -sSL https://githubusercontent.com -o instalador.sh && chmod +x instalador.sh && ./instalador.sh
-```
+
+git clone https://github.com/Rupeji/InstaladorArch/
+cd InstaladorArch
+chmod +x instalador.sh
+sudo ./instalador.sh
 
 ### Pasos durante la ejecución:
 1. El script actualizará los espejos de Pacman e instalará Docker de forma nativa.
