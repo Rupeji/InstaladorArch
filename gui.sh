@@ -1,51 +1,29 @@
-#!/usr/bin/env bash
-
-# Salir inmediatamente si un comando falla de forma imprevista
-set -e
-
-# Configuración de la IP fija global para el Servidor y LanCache
-LANCACHE_IP="192.168.0.7"
-
-echo "======================================================="
-echo "=== PASO 1: INSTALACIÓN DE DEPENDENCIAS DEL SISTEMA ==="
-echo "======================================================="
-
-# Guardar la versión del kernel antes de actualizar para prevenir colapso de módulos de Docker
-KERNEL_ANTES=$(uname -r)
-
-echo "--> Actualizando el sistema completo de Arch Linux (Pacman -Syu)..."
-sudo pacman -Syu --noconfirm
-
-echo "--> Instalando dependencias estructurales y binarios de red..."
-sudo pacman -S --needed --noconfirm \
-    docker \
-    containerd \
-    git \
-    coreutils \
-    docker-compose \
-    glibc \
-    iptables-nft \
-    util-linux \
-    gawk \
-    iproute2 \
-    dnssec-anchors \
-    openresolv
-
-# Verificar si pacman modificó el kernel en caliente y borró los módulos en ejecución
-KERNEL_AHORA=$(pacman -Q linux | awk '{print $2}' || echo "unknown")
-if [[ "$KERNEL_ANTES" != *"$KERNEL_AHORA"* ]] && [ -d "/usr/lib/modules/$KERNEL_ANTES" ] && [ ! -d "/usr/lib/modules/$(uname -r)" ]; then
-    echo "======================================================="
-    echo "[ALERTA CRÍTICA] El kernel de Arch Linux se actualizó."
-    echo "Los controladores lógicos de red para Docker se han borrado."
-    echo "Por seguridad, ejecuta un reinicio rápido del servidor:"
-    echo "                 'sudo reboot'"
-    echo "Y vuelve a lanzar este script. El despliegue continuará."
-    echo "======================================================="
-    exit 0
+#!/bin/bash
+# Evitar ejecuciones sin privilegios de root
+if [ "$EUID" -ne 0 ]; then
+  echo "Por favor, ejecuta este script como root (sudo)."
+  exit 1
 fi
 
-echo "--> Dependencias del sistema validadas con éxito."
-echo ""
+# =====================================================================
+# CONFIGURACIÓN FIJA DE RED Y ENTORNO
+# =====================================================================
+LANCACHE_IP="192.168.0.20"
+UPSTREAM_DNS="1.1.1.1"
+TZ="Europe/Madrid"
+
+echo "======================================================="
+echo "=== PASO 1: INSTALACIÓN DE DEPENDENCIAS (ARCH)      ==="
+echo "======================================================="
+pacman -Syu --noconfirm
+pacman -S --needed --noconfirm docker docker-compose git
+systemctl enable --now docker.service
+
+echo "======================================================="
+echo "=== PASO 1B: LIMPIEZA DE CONTENEDORES ANTIGUOS       ==="
+echo "======================================================="
+# Limpia cualquier residuo previo para evitar el error de "container already in use"
+docker rm -f lancache lancache-dns develancacheui-backend develancacheui-frontend 2>/dev/null || true
 
 echo "======================================================="
 echo "=== PASO 2: ASIGNACIÓN DE DISCO Y ESPACIO DINÁMICO  ==="
@@ -89,184 +67,105 @@ CACHE_DISK_SIZE="$(( FREE_GB - 15 ))g"
 echo "--> Almacenamiento libre calculado: ${FREE_GB} GB."
 echo "--> Tamaño máximo asignado para la caché de juegos: ${CACHE_DISK_SIZE}"
 
-DATA_DIR="${BASE_DIR}/lancache/data"
-LOG_DIR="${BASE_DIR}/lancache/logs"
+# Definición de subdirectorios bajo el punto de montaje seleccionado
+LANCACHE_ROOT="${BASE_DIR}/lancache"
+DATA_DIR="${LANCACHE_ROOT}/data"
+LOG_DIR="${LANCACHE_ROOT}/logs"
 
-# Permisos abiertos controlados para mitigar bloqueos de fstab externos con Docker
-sudo mkdir -p "$DATA_DIR" "$LOG_DIR"
-sudo chmod 777 "${BASE_DIR}/lancache"
-sudo chmod -R 777 "$DATA_DIR" "$LOG_DIR"
+# Permisos abiertos controlados para mitigar bloqueos con Docker
+mkdir -p "$DATA_DIR" "$LOG_DIR"
+touch "${LOG_DIR}/access.log"
+chmod 777 "$LANCACHE_ROOT"
+chmod -R 777 "$DATA_DIR" "$LOG_DIR"
 
-echo ""
+cd "$LANCACHE_ROOT"
+
 echo "======================================================="
-echo "=== PASO 3: CONTROL DE INTERFACES Y BLINDAJE DE RED  ==="
+echo "=== PASO 3: GENERANDO ARCHIVO DOCKER-COMPOSE        ==="
 echo "======================================================="
-
-# Detectar la interfaz física real conectada y su puerta de enlace (Gateway) actual
-INTERFACE=$(ip route | grep default | awk '{print $5}' | head -n1)
-GATEWAY=$(ip route | grep default | awk '{print $3}' | head -n1)
-
-if [ -z "$INTERFACE" ] || [ -z "$GATEWAY" ]; then
-    echo "¡Error crítico!: La máquina no dispone de una interfaz de red activa conectada a Internet."
-    exit 1
-fi
-
-# Desvincular cualquier archivo previo para evitar enlaces rotos de systemd-resolved
-sudo rm -f /etc/resolv.conf
-
-# Configurar servidores DNS temporales para que Docker pueda descargar las imágenes sin problemas
-echo "--> Configurando servidores de nombres raíz temporales..."
-cat <<EOF | sudo tee /etc/resolv.conf > /dev/null
-nameserver 1.1.1.1
-nameserver 8.8.8.8
-EOF
-
-# DESACTIVAR TOTALMENTE systemd-resolved para liberar el puerto 53 en el host
-if systemctl is-active --quiet systemd-resolved.service || systemctl is-enabled --quiet systemd-resolved.service; then
-    echo "--> Deteniendo y liberando puerto 53 de systemd-resolved..."
-    sudo systemctl stop systemd-resolved.service || true
-    sudo systemctl disable systemd-resolved.service || true
-fi
-
-echo "--> Arrancando e inicializando el motor de Docker..."
-sudo systemctl enable --now containerd.service
-sudo systemctl enable --now docker.service
-sudo systemctl restart docker.service
-
-sudo mkdir -p /opt/lancache-docker
-cd /opt/lancache-docker
-
-echo ""
-echo "======================================================="
-echo "=== PASO 4: CREACIÓN DE INFRAESTRUCTURA LANCACHE    ==="
-echo "======================================================="
-
-# Generar docker-compose.yml mapeado de forma nativa a la IP estática definitiva
-sudo tee docker-compose.yml > /dev/null <<EOF
+# Nota: Se remueve la propiedad obsoleta 'version' para limpiar el WARN de Docker
+cat << 'EOF' > docker-compose.yml
 services:
-  dns:
+  # Servidor DNS de LanCache
+  lancache-dns:
     image: lancachenet/lancache-dns:latest
     container_name: lancache-dns
     env_file: .env
-    restart: always
     ports:
-      - "\${LANCACHE_IP}:53:53/udp"
-      - "\${LANCACHE_IP}:53:53/tcp"
+      - "192.168.0.20:53:53/udp"
+      - "192.168.0.20:53:53/tcp"
+    restart: unless-stopped
 
-  sniproxy:
-    image: lancachenet/sniproxy:latest
-    container_name: lancache-sniproxy
-    env_file: .env
-    restart: always
-    ports:
-      - "\${LANCACHE_IP}:443:443/tcp"
-
-  monolithic:
+  # Servidor Caché monolítico
+  lancache:
     image: lancachenet/monolithic:latest
-    container_name: lancache-monolithic
+    container_name: lancache
     env_file: .env
-    restart: always
     ports:
-      - "\${LANCACHE_IP}:80:80/tcp"
+      - "192.168.0.20:80:80"
+      - "192.168.0.20:443:443"
     volumes:
-      - ${DATA_DIR}:/data/cache
-      - ${LOG_DIR}:/data/logs
+      - ./data:/data/cache
+      - ./logs:/data/logs
+    restart: unless-stopped
 
-  dashboard:
-    image: ninepiece2/ninelancacheui:latest
-    container_name: lancache-dashboard
-    env_file: .env
-    restart: always
+  # Backend de DeveLanCacheUI (Procesador de logs)
+  develancacheui-backend:
+    image: devedse/develancacheui_backend:latest
+    container_name: develancacheui-backend
     ports:
-      - "\${LANCACHE_IP}:8080:3000/tcp"
+      - "192.168.0.20:5000:8080"
     volumes:
-      - ${LOG_DIR}:/lancache/logs:ro
+      - ./logs:/app/lancachelogs
+    environment:
+      - TZ=${TZ}
+    restart: unless-stopped
+    depends_on:
+      - lancache
+
+  # Frontend de DeveLanCacheUI (Panel Visual Web)
+  develancacheui-frontend:
+    image: devedse/develancacheui_frontend:latest
+    container_name: develancacheui-frontend
+    ports:
+      - "192.168.0.20:8080:80"
+    environment:
+      - TZ=${TZ}
+    restart: unless-stopped
+    depends_on:
+      - develancacheui-backend
 EOF
 
-# Generar archivo .env
-sudo tee .env > /dev/null <<EOF
+echo "======================================================="
+echo "=== PASO 4: GENERANDO VARIABLES DE ENTORNO (.ENV)    ==="
+echo "======================================================="
+cat << EOF > .env
+# Configuración de red fija
 LANCACHE_IP=${LANCACHE_IP}
 DNS_BIND_IP=${LANCACHE_IP}
-UPSTREAM_DNS=1.1.1.1 8.8.8.8
+UPSTREAM_DNS=${UPSTREAM_DNS}
+WHITELIST_DNS=${UPSTREAM_DNS}
+
+# Parámetros dinámicos de almacenamiento calculados
 CACHE_DISK_SIZE=${CACHE_DISK_SIZE}
-CACHE_INDEX_SIZE=250m
 CACHE_MAX_AGE=3650d
-TZ=Europe/Madrid
+CACHE_INDEX_SIZE=500m
+
+# Ajustes del sistema (Mapeado exacto para evitar WARN)
+TZ=${TZ}
 EOF
 
-echo ""
 echo "======================================================="
-echo "=== PASO 5: DESPLIEGUE EN VIVO Y DESCARGA           ==="
+echo "=== PASO 5: DESPLEGANDO CONTENEDORES EN DOCKER      ==="
 echo "======================================================="
+docker compose up -d
 
-# Descargar y levantar utilizando de forma limpia y directa la sintaxis nativa de docker-compose
-sudo docker-compose up -d
-echo "--> Infraestructura de contenedores desplegada correctamente."
-
-echo ""
-echo "======================================================="
-echo "=== PASO 6: CONFIGURACIÓN PERSISTENTE DE IP EN ARCH ==="
-echo "======================================================="
-
-# Forzar de manera definitiva que la IP principal de ESTA máquina sea la 192.168.0.7
-if systemctl is-active --quiet NetworkManager.service; then
-    echo "--> Aplicando IP estática fija 192.168.0.7 en NetworkManager..."
-    NM_CONN=$(nmcli -t -f NAME,DEVICE connection show --active | grep ":${INTERFACE}$" | cut -d: -f1 | head -n1)
-    if [ -n "$NM_CONN" ]; then
-        sudo nmcli connection modify "$NM_CONN" ipv4.addresses "${LANCACHE_IP}/24"
-        sudo nmcli connection modify "$NM_CONN" ipv4.gateway "$GATEWAY"
-        sudo nmcli connection modify "$NM_CONN" ipv4.dns "1.1.1.1 8.8.8.8"
-        sudo nmcli connection modify "$NM_CONN" ipv4.method manual
-        echo "--> Configuración grabada. La IP del servidor cambiará al reiniciar."
-    fi
-else
-    echo "--> Configurando IP estática fija 192.168.0.7 en systemd-networkd..."
-    sudo mkdir -p /etc/systemd/network
-    
-    # Se sobrescribe el adaptador para que la IP del propio sistema operativo sea de verdad la .7
-    sudo tee "/etc/systemd/network/10-lancache-static.network" > /dev/null <<EOF
-[Match]
-Name=${INTERFACE}
-
-[Network]
-Address=${LANCACHE_IP}/24
-Gateway=${GATEWAY}
-DNS=1.1.1.1 8.8.8.8
-EOF
-    
-    sudo systemctl stop dhcpcd.service > /dev/null 2>&1 || true
-    sudo systemctl disable dhcpcd.service > /dev/null 2>&1 || true
-    sudo systemctl enable systemd-networkd.service > /dev/null 2>&1
-    
-    # Evitar que openresolv destruya el resolv.conf
-    sudo mkdir -p /etc
-    sudo tee /etc/resolvconf.conf > /dev/null <<EOF
-# Configurado por LanCache Script
-resolvconf=NO
-EOF
-    
-    sudo rm -f /etc/resolv.conf
-    cat <<EOF | sudo tee /etc/resolv.conf > /dev/null
-nameserver 1.1.1.1
-nameserver 8.8.8.8
-EOF
-    echo "--> Configuración de red estática completada."
-fi
-
-echo ""
-echo "======================================================="
-echo "===       ¡INSTALACIÓN COMPLETADA CON ÉXITO!        ==="
-echo "======================================================="
-echo " Tu servidor Arch Linux ahora se fijará en: ${LANCACHE_IP}"
-echo " Acceso al Dashboard desde tu red: http://${LANCACHE_IP}:8080"
-echo " Tamaño de almacenamiento asignado: ${CACHE_DISK_SIZE}"
-echo " Carpeta de administración: /opt/lancache-docker"
-echo "-------------------------------------------------------"
-echo " ¡¡ATENCIÓN PREVIO AL REINICIO!!:"
-echo " Al reiniciar, perderás tu IP actual de SSH."
-echo " Deberás volver a conectarte usando la nueva IP:"
-echo "                 ssh usuario@192.168.0.7"
-echo ""
-echo " Ejecuta el reinicio definitivo ahora mismo:"
-echo "                 'sudo reboot'"
-echo "======================================================="
+echo "========================================================="
+echo " ¡Instalación dinámica completada con éxito!"
+echo "========================================================="
+echo " -> Directorio de instalación: ${LANCACHE_ROOT}"
+echo " -> Espacio asignado a la caché: ${CACHE_DISK_SIZE}"
+echo " -> Servidor LanCache en IP: ${LANCACHE_IP}"
+echo " -> Acceso a la GUI Web: http://${LANCACHE_IP}:8080"
+echo " -> Cambia el DNS de tus clientes a: ${LANCACHE_IP}"
+echo "========================================================="
