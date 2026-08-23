@@ -10,11 +10,11 @@ echo "======================================================="
 echo "=== PASO 1: INSTALACIÓN DE DEPENDENCIAS DEL SISTEMA ==="
 echo "======================================================="
 
-# Actualizar repositorios e instalar paquetes base necesarios
-echo "--> Actualizando repositorios de Pacman..."
-sudo pacman -Sy
+# Actualizar repositorios y el sistema completo para evitar actualizaciones parciales
+echo "--> Actualizando el sistema completo (Pacman -Syu)..."
+sudo pacman -Syu --noconfirm
 
-echo "--> Instalando dependencias necesarias (docker, compose v2, coreutils)..."
+echo "--> Instalando dependencias necesarias (docker, compose, herramientas de red)..."
 sudo pacman -S --needed --noconfirm \
     docker \
     docker-compose \
@@ -30,20 +30,6 @@ echo "--> Dependencias instaladas correctamente."
 echo ""
 
 echo "======================================================="
-echo "=== PASO 1.5: LIBERAR PUERTO 53 (SYSTEMD-RESOLVED)  ==="
-echo "======================================================="
-# Evita que el contenedor DNS falle por culpa del resolver nativo de Arch
-if systemctl is-active --quiet systemd-resolved.service; then
-    echo "--> Optimizando systemd-resolved para liberar el puerto 53..."
-    sudo mkdir -p /etc/systemd/resolved.conf.d/
-    cat <<EOF | sudo tee /etc/systemd/resolved.conf.d/lancache.conf > /dev/null
-[Resolve]
-DNSStubListener=no
-EOF
-    sudo systemctl restart systemd-resolved.service
-fi
-
-echo "======================================================="
 echo "=== PASO 2: SELECCIÓN DEL DISCO Y ESPACIO DINÁMICO  ==="
 echo "======================================================="
 
@@ -54,7 +40,7 @@ df -h -x tmpfs -x devtmpfs -x run | grep -E '^/dev/' || df -h
 echo "-----------------------------------------------------------------------"
 echo ""
 
-# Bucle interactivo para la ruta de montaje
+# Bucle interactivo seguro para la ruta de montaje
 set +e
 while true; do
     read -p "Introduce la ruta absoluta del punto de montaje para LanCache (ej. /mnt/disco2 o /): " USER_PATH
@@ -95,14 +81,44 @@ sudo chmod -R 755 "${BASE_DIR}/lancache"
 
 echo ""
 echo "======================================================="
-echo "=== PASO 3: CONFIGURACIÓN DEL SISTEMA Y SERVICIOS   ==="
+echo "=== PASO 3: PREPARACIÓN DE RED Y SERVICIOS EN ARCH    ==="
 echo "======================================================="
 
+# Identificar la interfaz de red activa y su gateway
+INTERFACE=$(ip route | grep default | awk '{print $5}' | head -n1)
+GATEWAY=$(ip route | grep default | awk '{print $3}' | head -n1)
+
+if [ -z "$INTERFACE" ] || [ -z "$GATEWAY" ]; then
+    echo "¡Error crítico!: No se detectó una interfaz de red con salida a internet."
+    exit 1
+fi
+
+# Desactivar el Stub Listener de systemd-resolved liberando el puerto 53 sin romper DNS externo
+if systemctl is-active --quiet systemd-resolved.service; then
+    echo "--> Optimizando systemd-resolved para liberar el puerto 53..."
+    sudo mkdir -p /etc/systemd/resolved.conf.d/
+    cat <<EOF | sudo tee /etc/systemd/resolved.conf.d/lancache.conf > /dev/null
+[Resolve]
+DNSStubListener=no
+EOF
+    sudo systemctl restart systemd-resolved.service
+    
+    # Re-vincular resolv.conf al archivo correcto de systemd-resolved para no perder internet
+    echo "--> Corrigiendo enlace de /etc/resolv.conf..."
+    sudo rm -f /etc/resolv.conf
+    sudo ln -s /run/systemd/resolve/resolv.conf /etc/resolv.conf
+fi
+
+# Añadir la IP de LanCache como alias secundario (Evita cortes en SSH si estás usando otra IP temporal)
+echo "--> Asignando IP de LanCache (${LANCACHE_IP}) de forma segura..."
+sudo ip addr add ${LANCACHE_IP}/24 dev "$INTERFACE" label "${INTERFACE}:lancache" 2>/dev/null || true
+
+# Iniciar Docker de forma limpia
 echo "--> Activando e iniciando el servicio Docker..."
 sudo systemctl enable --now docker.service
 sudo systemctl restart docker.service
 
-# Crear el directorio como root/sudo para evitar conflictos de permisos con Docker
+# Crear directorio para el despliegue
 sudo mkdir -p /opt/lancache-docker
 cd /opt/lancache-docker
 
@@ -111,10 +127,8 @@ echo "======================================================="
 echo "=== PASO 4: CONFIGURACIÓN DE CONTENEDORES LANCACHE  ==="
 echo "======================================================="
 
-# Generar docker-compose.yml utilizando la sintaxis moderna de Docker Compose V2
+# Generar docker-compose.yml (Sintaxis moderna sin cabecera "version")
 sudo tee docker-compose.yml > /dev/null <<EOF
-version: '2.4'
-
 services:
   dns:
     image: lancachenet/lancache-dns:latest
@@ -160,43 +174,33 @@ echo "======================================================="
 echo "=== PASO 5: DESPLIEGUE DE LANCACHE                  ==="
 echo "======================================================="
 
-# Uso corregido de Docker Compose V2 (sin guion)
+# Descarga y despliegue usando Docker Compose V2
 sudo docker compose up -d
-echo "--> Contenedores inicializados correctamente."
+echo "--> Contenedores inicializados de manera correcta."
 
 echo ""
 echo "======================================================="
-echo "=== PASO 6: CONFIGURACIÓN DE IP ESTÁTICA PERMANENTE ==="
+echo "=== PASO 6: FIJACIÓN PERMANENTE DE LA IP ESTÁTICA   ==="
 echo "======================================================="
 
-INTERFACE=$(ip route | grep default | awk '{print $5}' | head -n1)
-GATEWAY=$(ip route | grep default | awk '{print $3}' | head -n1)
-
-if [ -z "$INTERFACE" ] || [ -z "$GATEWAY" ]; then
-    echo "[AVISO] No se pudo determinar la interfaz de red primaria de forma automática."
-    echo "Saltando configuración de red permanente para no romper el script."
-else
-    echo "--> Asegurando IP temporal inmediata para evitar cortes..."
-    sudo ip addr add ${LANCACHE_IP}/24 dev $INTERFACE 2>/dev/null || true
+# 1. Persistencia si el sistema limpia usa NetworkManager
+if systemctl is-active --quiet NetworkManager.service; then
+    echo "--> Aplicando persistencia fija en NetworkManager (nmcli)..."
+    NM_CONN=$(nmcli -t -f NAME,DEVICE connection show --active | grep ":${INTERFACE}$" | cut -d: -f1 | head -n1)
     
-    # 1. Configuración para NetworkManager
-    if systemctl is-active --quiet NetworkManager.service; then
-        echo "--> Configurando a través de NetworkManager (nmcli)..."
-        NM_CONN=$(nmcli -t -f NAME,DEVICE connection show --active | grep ":${INTERFACE}$" | cut -d: -f1 | head -n1)
-        
-        if [ -n "$NM_CONN" ]; then
-            sudo nmcli connection modify "$NM_CONN" ipv4.addresses "${LANCACHE_IP}/24"
-            sudo nmcli connection modify "$NM_CONN" ipv4.gateway "$GATEWAY"
-            sudo nmcli connection modify "$NM_CONN" ipv4.dns "1.1.1.1 8.8.8.8"
-            sudo nmcli connection modify "$NM_CONN" ipv4.method manual
-            echo "--> Configuración guardada en NetworkManager de forma permanente."
-        fi
+    if [ -n "$NM_CONN" ]; then
+        sudo nmcli connection modify "$NM_CONN" ipv4.addresses "${LANCACHE_IP}/24"
+        sudo nmcli connection modify "$NM_CONN" ipv4.gateway "$GATEWAY"
+        sudo nmcli connection modify "$NM_CONN" ipv4.dns "1.1.1.1 8.8.8.8"
+        sudo nmcli connection modify "$NM_CONN" ipv4.method manual
+        echo "--> Configuración estática guardada de forma permanente."
+    fi
 
-    # 2. Configuración para systemd-networkd
-    elif systemctl is-active --quiet systemd-networkd.service || [ ! -f /etc/NetworkManager/NetworkManager.conf ]; then
-        echo "--> Configurando a través de systemd-networkd..."
-        sudo mkdir -p /etc/systemd/network
-        sudo tee "/etc/systemd/network/10-lancache-static.network" > /dev/null <<EOF
+# 2. Persistencia estándar de Arch Linux (systemd-networkd)
+elif systemctl is-active --quiet systemd-networkd.service || [ ! -f /etc/NetworkManager/NetworkManager.conf ]; then
+    echo "--> Aplicando persistencia fija en systemd-networkd..."
+    sudo mkdir -p /etc/systemd/network
+    sudo tee "/etc/systemd/network/10-lancache-static.network" > /dev/null <<EOF
 [Match]
 Name=${INTERFACE}
 
@@ -205,17 +209,19 @@ Address=${LANCACHE_IP}/24
 Gateway=${GATEWAY}
 DNS=1.1.1.1 8.8.8.8
 EOF
-        sudo systemctl enable systemd-networkd.service > /dev/null 2>&1
-        echo "--> Configuración guardada en systemd-networkd de forma permanente."
-    fi
+    sudo systemctl enable systemd-networkd.service > /dev/null 2>&1
+    echo "--> Configuración estática guardada en systemd-networkd."
 fi
 
 echo ""
 echo "======================================================="
 echo "===       ¡INSTALACIÓN COMPLETADA CON ÉXITO!        ==="
 echo "======================================================="
-echo " LanCache está corriendo en la IP: ${LANCACHE_IP}"
+echo " LanCache está corriendo y escuchando en la IP: ${LANCACHE_IP}"
 echo " Tamaño máximo de caché asignado: ${CACHE_DISK_SIZE}"
 echo " Directorio de despliegue: /opt/lancache-docker"
-echo " Ruta de almacenamiento de juegos: ${DATA_DIR}"
+echo " Almacenamiento de descargas de juegos: ${DATA_DIR}"
+echo "-------------------------------------------------------"
+echo " NOTA: Para consolidar la IP estática definitiva como única,"
+echo " se recomienda reiniciar el servidor una vez termine: 'sudo reboot'"
 echo "======================================================="
