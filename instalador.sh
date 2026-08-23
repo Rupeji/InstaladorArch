@@ -24,6 +24,12 @@ fi
 
 echo "[-] Privilegios de administrador verificados correctamente."
 
+# Variables de Red fijas
+LANCACHE_IP="192.168.0.7"
+NETMASK_SHORT="24" # Equivale a 255.255.255.0
+GATEWAY="192.168.0.1" 
+DNS_PROVISIONAL="1.1.1.1" # DNS temporal para descargar las imágenes de Docker
+
 # ==========================================
 # 0.1 INSTALACIÓN DE DEPENDENCIAS NECESARIAS
 # ==========================================
@@ -33,7 +39,7 @@ echo "---------------------------------------------------------"
 
 # Se instala openssh junto con el resto de herramientas esenciales
 pacman -Sy --noconfirm
-pacman -S --needed --noconfirm git curl util-linux docker docker-compose fasfetch nano openssh
+pacman -S --needed --noconfirm git curl util-linux docker docker-compose fastfetch nano openssh
 
 echo "[-] Configurando e iniciando los servicios del sistema..."
 # Inicia y habilita Docker
@@ -54,16 +60,69 @@ fi
 
 # Reiniciar el servicio SSH para aplicar la nueva directiva de acceso root
 systemctl restart sshd
+
+# ==========================================
+# 0.2 CONFIGURACIÓN INTELIGENTE DE IP ESTÁTICA
+# ==========================================
 echo "---------------------------------------------------------"
+echo "[-] Detectando gestor de red activo para aplicar IP estática..."
 
-# Variables de Red fijas
-LANCACHE_IP="192.168.0.7"
-NETMASK_SHORT="24" # Equivale a 255.255.255.0
+# Obtener el nombre de la interfaz de red principal conectada a internet
+INTERFACE=$(ip route | grep default | awk '{print $5}' | head -n 1)
 
-# NOTA: Esta es la IP de la puerta de enlace (tu router local)
-GATEWAY="192.168.0.1" 
+if [ -z "$INTERFACE" ]; then
+    echo "[!] Advertencia: No se detectó ninguna interfaz de red activa con salida a internet."
+    echo "    Se omitirá la configuración automática de IP estática."
+else
+    echo "[+] Interfaz de red detectada: $INTERFACE"
+    
+    # 1. Detección y configuración para NetworkManager
+    if systemctl is-active --quiet NetworkManager; then
+        echo "[+] Detectado NetworkManager activo. Configurando IP estática..."
+        nmcli connection modify "$INTERFACE" ipv4.addresses "$LANCACHE_IP/$NETMASK_SHORT"
+        nmcli connection modify "$INTERFACE" ipv4.gateway "$GATEWAY"
+        nmcli connection modify "$INTERFACE" ipv4.dns "$DNS_PROVISIONAL"
+        nmcli connection modify "$INTERFACE" ipv4.method manual
+        nmcli connection up "$INTERFACE"
+        echo "[+] NetworkManager configurado correctamente."
 
-DNS_PROVISIONAL="1.1.1.1" # DNS temporal para descargar las imágenes de Docker
+    # 2. Detección y configuración para systemd-networkd
+    elif systemctl is-active --quiet systemd-networkd; then
+        echo "[+] Detectado systemd-networkd activo. Configurando IP estática..."
+        NET_FILE="/etc/systemd/network/10-static-en.network"
+        cat <<EOF > "$NET_FILE"
+[Match]
+Name=$INTERFACE
+
+[Network]
+Address=$LANCACHE_IP/$NETMASK_SHORT
+Gateway=$GATEWAY
+DNS=$DNS_PROVISIONAL
+EOF
+        systemctl restart systemd-networkd
+        echo "[+] systemd-networkd configurado correctamente."
+
+    # 3. Detección y configuración para dhcpcd
+    elif systemctl is-active --quiet dhcpcd; then
+        echo "[+] Detectado dhcpcd activo. Configurando IP estática..."
+        # Evitar duplicar la configuración si se ejecuta el script varias veces
+        sed -i "/interface $INTERFACE/,+4d" /etc/dhcpcd.conf
+        cat <<EOF >> /etc/dhcpcd.conf
+
+interface $INTERFACE
+static ip_address=$LANCACHE_IP/$NETMASK_SHORT
+static routers=$GATEWAY
+static domain_name_servers=$DNS_PROVISIONAL
+EOF
+        systemctl restart dhcpcd
+        echo "[+] dhcpcd configurado correctamente."
+    
+    else
+        echo "[!] No se detectó NetworkManager, systemd-networkd ni dhcpcd activo."
+        echo "    Por favor, asegúrate de fijar la IP $LANCACHE_IP manualmente."
+    fi
+fi
+echo "---------------------------------------------------------"
 
 # ==========================================
 # 1. SELECCIÓN DE DISCO DURO PARA LOS JUEGOS
@@ -71,10 +130,10 @@ DNS_PROVISIONAL="1.1.1.1" # DNS temporal para descargar las imágenes de Docker
 echo ""
 echo "[?] Discos de almacenamiento disponibles en el sistema:"
 echo "---------------------------------------------------------"
-lsblk -d -n -o NAME,SIZE,MODEL
+lsblk -n -o NAME,SIZE,FSTYPE,MODEL
 echo "---------------------------------------------------------"
 
-read -p "[>] Escribe el nombre exacto del disco para LanCache (ej. sdb o nvme1n1): " DISK_NAME
+read -p "[>] Escribe el nombre exacto de la partición vacía formateada (ej. sdb1 o nvme1n1p1): " DISK_NAME
 
 # Validar que el dispositivo de bloque realmente existe en el sistema
 if [ ! -b "/dev/$DISK_NAME" ]; then
@@ -82,37 +141,41 @@ if [ ! -b "/dev/$DISK_NAME" ]; then
     exit 1
 fi
 
-echo ""
-echo "[!] ADVERTENCIA CRÍTICA: Se van a borrar y formatear todos los datos en /dev/$DISK_NAME"
-read -p "[?] ¿Estás completamente seguro de continuar con el formateo? (s/N): " CONFIRM
-if [[ ! "$CONFIRM" =~ ^[sS]$ ]]; then
-    echo "[-] Operación cancelada de forma segura por el usuario."
-    exit 0
-fi
-
-# Formatear el disco utilizando el sistema de archivos estándar EXT4
-echo "[-] Formateando /dev/$DISK_NAME en formato EXT4..."
-mkfs.ext4 -F "/dev/$DISK_NAME"
-
 # Configurar el punto de montaje del sistema
 MOUNT_POINT="/mnt/lancache"
 mkdir -p "$MOUNT_POINT"
 
-# Extraer el UUID único del disco para evitar problemas si cambia el orden de los cables
+# Extraer el UUID único del disco para el montaje persistente
 DISK_UUID=$(blkid -o value -s UUID "/dev/$DISK_NAME")
+FS_TYPE=$(blkid -o value -s TYPE "/dev/$DISK_NAME")
+
+# Verificar si el UUID y el formato son correctos
+if [ -z "$DISK_UUID" ] || [ -z "$FS_TYPE" ]; then
+    echo "[!] Error: No se pudo leer el sistema de archivos de /dev/$DISK_NAME."
+    echo "    Asegúrate de escribir el nombre de la partición ya formateada (ej. sdb1, no sdb)."
+    exit 1
+fi
 
 echo "[-] Añadiendo entrada persistente en /etc/fstab mediante UUID..."
 if ! grep -q "$DISK_UUID" /etc/fstab; then
-    echo "UUID=$DISK_UUID $MOUNT_POINT ext4 defaults,noatime 0 2" >> /etc/fstab
+    echo "UUID=$DISK_UUID $MOUNT_POINT $FS_TYPE defaults,noatime 0 2" >> /etc/fstab
 fi
 
-echo "[-] Montando la nueva unidad..."
-mount -a
+echo "[-] Asegurando el montaje de la unidad..."
+if mount | grep -q "$MOUNT_POINT"; then
+    echo "[-] La unidad ya se encontraba montada en $MOUNT_POINT."
+else
+    mount -a
+fi
 
 # Estructurar las carpetas internas requeridas por LanCache dentro del disco seleccionado
 CACHE_DATA_DIR="$MOUNT_POINT/data"
 CACHE_LOGS_DIR="$MOUNT_POINT/logs"
+echo "[-] Creando la estructura inicial de directorios en la unidad vacía..."
 mkdir -p "$CACHE_DATA_DIR" "$CACHE_LOGS_DIR"
+
+# Otorgar permisos globales a las carpetas del disco para evitar bloqueos de Docker
+chmod -R 777 "$CACHE_DATA_DIR" "$CACHE_LOGS_DIR"
 
 # ==========================================
 # 2. CONFIGURACIÓN DEL ENTORNO LANCACHE
