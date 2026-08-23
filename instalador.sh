@@ -29,7 +29,6 @@ sudo pacman -S --needed --noconfirm \
     util-linux \
     gawk \
     iproute2 \
-    bridge-utils \
     dnssec-anchors \
     openresolv
 
