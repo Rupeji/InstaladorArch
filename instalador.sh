@@ -17,10 +17,10 @@ echo "--> Actualizando el sistema completo de Arch Linux (Pacman -Syu)..."
 sudo pacman -Syu --noconfirm
 
 echo "--> Instalando dependencias estructurales y binarios de red..."
-# Docker y su plugin CLI de compose se gestionan juntos de forma nativa en Arch
+# CORREGIDO: Se elimina 'docker-compose' (paquete obsoleto en Arch). 
+# El plugin V2 moderno se incluye automáticamente de forma nativa al instalar 'docker'.
 sudo pacman -S --needed --noconfirm \
     docker \
-    docker-compose \
     containerd \
     git \
     coreutils \
@@ -77,8 +77,9 @@ while true; do
 done
 set -e
 
-# Cálculo matemático dinámico del almacenamiento seguro (Margen de protección de 15GB)
-FREE_KB=$(df -k "$BASE_DIR" | awk 'NR==2 {print $4}')
+# CORREGIDO: Uso de '--output=avail' para garantizar una salida numérica limpia en una sola línea, 
+# evitando que nombres de dispositivos largos (NVMe/LVM) dividan la salida de df y rompan la matemática.
+FREE_KB=$(df -k --output=avail "$BASE_DIR" | tail -n1 | tr -d ' ')
 FREE_GB=$(( FREE_KB / 1024 / 1024 ))
 
 if [ "$FREE_GB" -le 25 ]; then
@@ -105,8 +106,10 @@ echo "======================================================="
 
 INTERFACE=$(ip route | grep default | awk '{print $5}' | head -n1)
 GATEWAY=$(ip route | grep default | awk '{print $3}' | head -n1)
+# CORREGIDO: Captura la IP actual del servidor para asegurar la persistencia sin perder acceso SSH.
+CURRENT_IP=$(ip -o -4 addr show dev "$INTERFACE" | awk '{print $4}' | cut -d/ -f1 | head -n1)
 
-if [ -z "$INTERFACE" ] || [ -z "$GATEWAY" ]; then
+if [ -z "$INTERFACE" ] || [ -z "$GATEWAY" ] || [ -z "$CURRENT_IP" ]; then
     echo "¡Error crítico!: La máquina no dispone de una interfaz de red activa conectada a Internet."
     exit 1
 fi
@@ -129,7 +132,7 @@ if systemctl is-active --quiet systemd-resolved.service || systemctl is-enabled 
 fi
 
 # Levantar alias virtual secundario para la IP de LanCache (Protección SSH anti-desconexión masiva)
-echo "--> Asignando alias virtual a la interfaz principal (${LANCACHE_IP})..."
+echo "--> Asignando alias virtual a la interfaz principal (${LANCACHE_IP})...."
 sudo ip addr add ${LANCACHE_IP}/24 dev "$INTERFACE" label "${INTERFACE}:lancache" 2>/dev/null || true
 
 echo "--> Arrancando e inicializando el motor de Docker..."
@@ -206,21 +209,25 @@ if systemctl is-active --quiet NetworkManager.service; then
     echo "--> Aplicando configuración estática permanente en NetworkManager..."
     NM_CONN=$(nmcli -t -f NAME,DEVICE connection show --active | grep ":${INTERFACE}$" | cut -d: -f1 | head -n1)
     if [ -n "$NM_CONN" ]; then
-        sudo nmcli connection modify "$NM_CONN" ipv4.addresses "${LANCACHE_IP}/24"
-        sudo nmcli connection modify "$NM_CONN" ipv4.gateway "$GATEWAY"
+        # CORREGIDO: Se utiliza el operador '+' para AÑADIR la IP de LanCache como alias secundario permanente.
+        # Esto previene que se borre la IP de gestión original del servidor y evita la desconexión SSH.
+        sudo nmcli connection modify "$NM_CONN" +ipv4.addresses "${LANCACHE_IP}/24"
         sudo nmcli connection modify "$NM_CONN" ipv4.dns "1.1.1.1 8.8.8.8"
-        sudo nmcli connection modify "$NM_CONN" ipv4.method manual
-        echo "--> Configuración grabada en perfiles de NetworkManager."
+        echo "--> Configuración grabada en perfiles de NetworkManager (IP alias añadida)."
     fi
 else
     # Red nativa para Arch Linux simple
     echo "--> Forzando configuración estática robusta en la arquitectura systemd-networkd..."
     sudo mkdir -p /etc/systemd/network
+    
+    # CORREGIDO: El archivo .network ahora declara explícitamente tanto la IP original del servidor 
+    # como la IP secundaria dedicada a LanCache, asegurando que ambas sobrevivan al reinicio.
     sudo tee "/etc/systemd/network/10-lancache-static.network" > /dev/null <<EOF
 [Match]
 Name=${INTERFACE}
 
 [Network]
+Address=${CURRENT_IP}/24
 Address=${LANCACHE_IP}/24
 Gateway=${GATEWAY}
 DNS=1.1.1.1 8.8.8.8
@@ -254,6 +261,7 @@ echo "======================================================="
 echo "===       ¡INSTALACIÓN COMPLETADA CON ÉXITO!        ==="
 echo "======================================================="
 echo " Servidor LanCache configurado en: ${LANCACHE_IP}"
+echo " IP de gestión SSH mantenida en: ${CURRENT_IP}"
 echo " Tamaño de almacenamiento asignado: ${CACHE_DISK_SIZE}"
 echo " Carpeta de administración: /opt/lancache-docker"
 echo " Almacenamiento físico de descargas: ${DATA_DIR}"
