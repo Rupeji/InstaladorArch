@@ -42,7 +42,7 @@ sudo ./instalador.sh
 Una vez reiniciado el servidor, podrás acceder a los paneles desde cualquier navegador de tu red local:
 
 * **Panel de Estadísticas LanCache**: `http://192.168.0.7:8080`
-* **Panel de Control Pi-hole**: `[http://192.168.0](http://192.168.0.7:8081/admin)` *(Contraseña por defecto: `admin`)*
+* **Panel de Control Pi-hole**: `http://192.168.0.7:8081/admin` *(Contraseña por defecto: `admin`)*
 * **Acceso SSH al Servidor**: `ssh tu_usuario@192.168.0.7`
 
 ---
