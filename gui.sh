@@ -22,6 +22,7 @@ sudo pacman -S --needed --noconfirm \
     containerd \
     git \
     coreutils \
+    docker-compose \
     glibc \
     iptables-nft \
     util-linux \
