@@ -30,7 +30,6 @@ sudo pacman -S --needed --noconfirm \
     util-linux \
     gawk \
     iproute2 \
-    bridge-utils \
     dnssec-anchors
 
 KERNEL_AHORA=$(pacman -Q linux | awk '{print $2}' || echo "unknown")
