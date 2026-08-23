@@ -270,4 +270,25 @@ if [ -n "$INTERFACE" ]; then
         if [ -n "$NM_CONN" ]; then
             nmcli connection modify "$NM_CONN" ipv4.dns "$LANCACHE_IP"
             nmcli connection up "$NM_CONN"
-        fi
+            fi
+            elif systemctl is-active --quiet systemd-networkd; then
+            # Actualizar DNS en el archivo estático de systemd-networkd
+            sed -i "s/DNS=./DNS=$LANCACHE_IP/" /etc/systemd/network/10-static-en.network
+            systemctl restart systemd-networkd
+            elif systemctl is-active --quiet dhcpcd; then
+            # Actualizar DNS en dhcpcd
+            sed -i "s/static domain_name_servers=./static domain_name_servers=$LANCACHE_IP/" /
+            etc/dhcpcd.conf
+            systemctl restart dhcpcd
+            else
+            # Caída de respaldo: Forzar de manera manual en resolv.conf
+            echo "nameserver $LANCACHE_IP" > /etc/resolv.conf
+            fi
+            fi
+            echo "========================================================="
+            echo " ¡INSTALACIÓN COMPLETADA EXITOSAMENTE!"
+            echo "========================================================="
+            echo " -> LanCache DNS & Monolithic operativo en: $LANCACHE_IP"
+            echo " -> Pi-hole Admin Panel accesible en: http://$PIHOLE_IP/admin"
+            echo " -> Contraseña de Pi-hole: $PASSWORD_PIHOLE"
+            echo "========================================================="
