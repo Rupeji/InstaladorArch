@@ -20,15 +20,26 @@ fi
 
 cd "$PROJECT_DIR"
 
-# 2. Extraer dinámicamente la ruta de logs elegida en el script anterior
+# 2. Extraer dinámicamente las rutas de almacenamiento del instalador principal
 echo "--> Detectando rutas de almacenamiento previas..."
+
+# Extraer de forma segura la ruta real de datos (/data/cache)
+DATA_DIR=$(grep -A 10 "monolithic:" docker-compose.yml | grep "/data/cache" | awk -F':' '{print $1}' | awk '{print $2}')
+# Extraer de forma segura la ruta real de logs (/data/logs)
 LOG_DIR=$(grep -A 10 "monolithic:" docker-compose.yml | grep "/data/logs" | awk -F':' '{print $1}' | awk '{print $2}')
+
+if [ -z "$DATA_DIR" ] || [ ! -d "$DATA_DIR" ]; then
+    echo "¡Error crítico!: No se pudo determinar el directorio de datos o la carpeta no existe."
+    exit 1
+fi
 
 if [ -z "$LOG_DIR" ] || [ ! -d "$LOG_DIR" ]; then
     echo "¡Error crítico!: No se pudo determinar el directorio de logs o la carpeta no existe."
     exit 1
 fi
-echo "--> Carpeta de logs detectada correctamente en: $LOG_DIR"
+
+echo "--> Carpeta de datos detectada en: $DATA_DIR"
+echo "--> Carpeta de logs detectada en: $LOG_DIR"
 
 # 3. Modificar el archivo docker-compose.yml para inyectar el contenedor de la GUI
 echo "--> Integrando contenedor Lancache-Dashboard en la infraestructura existente..."
@@ -36,7 +47,7 @@ echo "--> Integrando contenedor Lancache-Dashboard en la infraestructura existen
 # Crear una copia de seguridad por seguridad antes de modificar
 sudo cp docker-compose.yml docker-compose.yml.bak
 
-# Reescritura limpia añadiendo el servicio del panel gráfico
+# Reescritura limpia inyectando las rutas reales detectadas como cadenas absolutas
 sudo tee docker-compose.yml > /dev/null <<EOF
 services:
   dns:
@@ -64,8 +75,8 @@ services:
     ports:
       - "${LANCACHE_IP}:80:80/tcp"
     volumes:
-      - \${DATA_DIR}:/data/cache
-      - ${LOG_DIR}:/data/logs
+      - "${DATA_DIR}:/data/cache"
+      - "${LOG_DIR}:/data/logs"
 
   dashboard:
     image: lancachenet/lancache-dashboard:latest
@@ -76,15 +87,27 @@ services:
     environment:
       - TZ=Europe/Madrid
     volumes:
-      - ${LOG_DIR}:/var/log/nginx
+      - "${LOG_DIR}:/var/log/nginx"
 EOF
 
-echo "--> Archivo de configuración actualizado con éxito."
+# Validar la sintaxis del archivo generado antes de romper nada
+if ! sudo docker compose config > /dev/null 2>&1; then
+    echo "¡Error crítico!: La sintaxis del archivo docker-compose generado es incorrecta."
+    echo "Restaurando copia de seguridad..."
+    sudo cp docker-compose.yml.bak docker-compose.yml
+    exit 1
+fi
+
+echo "--> Archivo de configuración actualizado y validado con éxito."
 echo ""
 
 echo "======================================================="
 echo "=== PASO 2: REINICIANDO Y DESPLEGANDO LA INTERFAZ   ==="
 echo "======================================================="
+
+# Descargar la imagen del dashboard de forma explícita
+echo "--> Descargando imagen del panel gráfico..."
+sudo docker compose pull dashboard
 
 # Actualizar el despliegue con la nueva GUI instalada
 echo "--> Recreando la pila de Docker con el nuevo panel integrado..."
