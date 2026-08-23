@@ -1,52 +1,153 @@
 #!/usr/bin/env bash
 
-# Salir inmediatamente si un comando falla
+# Salir inmediatamente si un comando falla de forma imprevista
 set -e
 
-# Configuración de variables fijas compatibles con el script anterior
+# Configuración de variables fijas solicitadas
 LANCACHE_IP="192.168.0.7"
-PROJECT_DIR="/opt/lancache-docker"
 
 echo "======================================================="
-echo "=== INICIANDO INSTALACIÓN DE INTERFAZ GRÁFICA (GUI) ==="
+echo "=== PASO 1: INSTALACIÓN DE DEPENDENCIAS DEL SISTEMA ==="
 echo "======================================================="
 
-# 1. Verificar si existe la instalación previa de LanCache
-if [ ! -d "$PROJECT_DIR" ] || [ ! -f "$PROJECT_DIR/docker-compose.yml" ]; then
-    echo "¡Error crítico!: No se encontró la carpeta o el archivo docker-compose en $PROJECT_DIR."
-    echo "Por favor, ejecuta primero el script de instalación de LanCache."
+# Guardar la versión del kernel antes de actualizar para prevenir colapso de módulos de Docker
+KERNEL_ANTES=$(uname -r)
+
+echo "--> Actualizando el sistema completo de Arch Linux (Pacman -Syu)..."
+sudo pacman -Syu --noconfirm
+
+echo "--> Instalando dependencias estructurales y binarios de red..."
+# Docker y su plugin CLI de compose se gestionan juntos de forma nativa en Arch
+sudo pacman -S --needed --noconfirm \
+    docker \
+    containerd \
+    git \
+    coreutils \
+    glibc \
+    iptables-nft \
+    util-linux \
+    gawk \
+    iproute2 \
+    dnssec-anchors \
+    openresolv
+
+# Verificar si pacman modificó el kernel en caliente y borró los módulos en ejecución
+KERNEL_AHORA=$(pacman -Q linux | awk '{print $2}' || echo "unknown")
+if [[ "$KERNEL_ANTES" != *"$KERNEL_AHORA"* ]] && [ -d "/usr/lib/modules/$KERNEL_ANTES" ] && [ ! -d "/usr/lib/modules/$(uname -r)" ]; then
+    echo "======================================================="
+    echo "[ALERTA CRÍTICA] El kernel de Arch Linux se actualizó."
+    echo "Los controladores lógicos de red para Docker se han borrado."
+    echo "Por seguridad, ejecuta un reinicio rápido del servidor:"
+    echo "                 'sudo reboot'"
+    echo "Y vuelve a lanzar este script. El despliegue continuará."
+    echo "======================================================="
+    exit 0
+fi
+
+echo "--> Dependencias del sistema validadas con éxito."
+echo ""
+
+echo "======================================================="
+echo "=== PASO 2: ASIGNACIÓN DE DISCO Y ESPACIO DINÁMICO  ==="
+echo "======================================================="
+
+echo "Puntos de montaje activos detectados en tu Arch Linux:"
+echo "-----------------------------------------------------------------------"
+df -h -x tmpfs -x devtmpfs -x run | grep -E '^/dev/' || df -h
+echo "-----------------------------------------------------------------------"
+echo ""
+
+# Bucle interactivo con validación estricta de rutas de almacenamiento
+set +e
+while true; do
+    read -p "Introduce la ruta absoluta del punto de montaje para LanCache (ej. /mnt/disco2 o /): " USER_PATH
+    
+    if [[ -z "$USER_PATH" ]] || [[ ! "$USER_PATH" =~ ^/ ]]; then
+        echo "Error: Debes introducir una ruta absoluta que comience por '/'."
+        continue
+    fi
+    
+    if [ -d "$USER_PATH" ]; then
+        BASE_DIR=$(realpath "$USER_PATH")
+        break
+    else
+        echo "Error: La ruta '$USER_PATH' no existe en el sistema o no está montada."
+    fi
+done
+set -e
+
+# Uso de '--output=avail' para garantizar una salida numérica limpia en una sola línea, 
+# evitando que nombres de dispositivos largos (NVMe/LVM) dividan la salida de df y rompan la matemática.
+FREE_KB=$(df -k --output=avail "$BASE_DIR" | tail -n1 | tr -d ' ')
+FREE_GB=$(( FREE_KB / 1024 / 1024 ))
+
+if [ "$FREE_GB" -le 25 ]; then
+    echo "¡Error fatal!: Almacenamiento insuficiente en el disco (${FREE_GB}GB). LanCache requiere al menos 25GB libres."
     exit 1
 fi
 
-cd "$PROJECT_DIR"
+CACHE_DISK_SIZE="$(( FREE_GB - 15 ))g"
+echo "--> Almacenamiento libre calculado: ${FREE_GB} GB."
+echo "--> Tamaño máximo asignado para la caché de juegos: ${CACHE_DISK_SIZE}"
 
-# 2. Extraer dinámicamente la ruta de logs y datos elegida en el script anterior
-echo "--> Detectando rutas de almacenamiento previas..."
+DATA_DIR="${BASE_DIR}/lancache/data"
+LOG_DIR="${BASE_DIR}/lancache/logs"
 
-# CORRECCIÓN DE EXTRACCIÓN: Filtra y limpia el guion "-" y espacios en blanco del archivo YAML original
-DATA_DIR=$(grep -A 10 "monolithic:" docker-compose.yml | grep "/data/cache" | awk -F':' '{print $1}' | sed 's/^[ \t]*-[ \t]*//' | xargs)
-LOG_DIR=$(grep -A 10 "monolithic:" docker-compose.yml | grep "/data/logs" | awk -F':' '{print $1}' | sed 's/^[ \t]*-[ \t]*//' | xargs)
+# Permisos abiertos controlados para mitigar bloqueos de fstab externos con Docker
+sudo mkdir -p "$DATA_DIR" "$LOG_DIR"
+sudo chmod 777 "${BASE_DIR}/lancache"
+sudo chmod -R 777 "$DATA_DIR" "$LOG_DIR"
 
-if [ -z "$DATA_DIR" ] || [ ! -d "$DATA_DIR" ]; then
-    echo "¡Error crítico!: No se pudo determinar el directorio de datos o la carpeta no existe."
+echo ""
+echo "======================================================="
+echo "=== PASO 3: CONTROL DE INTERFACES Y BLINDAJE DE RED  ==="
+echo "======================================================="
+
+INTERFACE=$(ip route | grep default | awk '{print $5}' | head -n1)
+GATEWAY=$(ip route | grep default | awk '{print $3}' | head -n1)
+# Captura la IP actual del servidor para asegurar la persistencia sin perder acceso SSH.
+CURRENT_IP=$(ip -o -4 addr show dev "$INTERFACE" | awk '{print $4}' | cut -d/ -f1 | head -n1)
+
+if [ -z "$INTERFACE" ] || [ -z "$GATEWAY" ] || [ -z "$CURRENT_IP" ]; then
+    echo "¡Error crítico!: La máquina no dispone de una interfaz de red activa conectada a Internet."
     exit 1
 fi
 
-if [ -z "$LOG_DIR" ] || [ ! -d "$LOG_DIR" ]; then
-    echo "¡Error crítico!: No se pudo determinar el directorio de logs o la carpeta no existe."
-    exit 1
+# Desvincular cualquier archivo previo para evitar enlaces rotos de systemd-resolved
+sudo rm -f /etc/resolv.conf
+
+# BLINDAJE DE RESOLUCIÓN INTERNA: Forzar DNS estables de producción en el host
+echo "--> Configurando servidores de nombres raíz temporales..."
+cat <<EOF | sudo tee /etc/resolv.conf > /dev/null
+nameserver 1.1.1.1
+nameserver 8.8.8.8
+EOF
+
+# DESACTIVAR TOTALMENTE systemd-resolved para liberar el puerto 53 en todas las IPs locales
+if systemctl is-active --quiet systemd-resolved.service || systemctl is-enabled --quiet systemd-resolved.service; then
+    echo "--> Deteniendo y liberando puerto 53 de systemd-resolved..."
+    sudo systemctl stop systemd-resolved.service || true
+    sudo systemctl disable systemd-resolved.service || true
 fi
 
-echo "--> Carpeta de datos detectada correctamente en: $DATA_DIR"
-echo "--> Carpeta de logs detectada correctamente en: $LOG_DIR"
+# Levantar alias virtual secundario para la IP de LanCache (Protección SSH anti-desconexión masiva)
+echo "--> Asignando alias virtual a la interfaz principal (${LANCACHE_IP})...."
+sudo ip addr add ${LANCACHE_IP}/24 dev "$INTERFACE" label "${INTERFACE}:lancache" 2>/dev/null || true
 
-# 3. Modificar el archivo docker-compose.yml para inyectar el contenedor de la GUI
-echo "--> Integrando contenedor Lancache-Dashboard en la infraestructura existente..."
+echo "--> Arrancando e inicializando el motor de Docker..."
+sudo systemctl enable --now containerd.service
+sudo systemctl enable --now docker.service
+sudo systemctl restart docker.service
 
-# Crear una copia de seguridad por seguridad antes de modificar
-sudo cp docker-compose.yml docker-compose.yml.bak
+sudo mkdir -p /opt/lancache-docker
+cd /opt/lancache-docker
 
-# Reescritura limpia añadiendo el servicio del panel gráfico
+echo ""
+echo "======================================================="
+echo "=== PASO 4: CREACIÓN DE INFRAESTRUCTURA LANCACHE    ==="
+echo "======================================================="
+
+# Generar docker-compose.yml nativo incluyendo lancache-dashboard
 sudo tee docker-compose.yml > /dev/null <<EOF
 services:
   dns:
@@ -74,37 +175,109 @@ services:
     ports:
       - "${LANCACHE_IP}:80:80/tcp"
     volumes:
-      - "${DATA_DIR}:/data/cache"
-      - "${LOG_DIR}:/data/logs"
+      - ${DATA_DIR}:/data/cache
+      - ${LOG_DIR}:/data/logs
 
   dashboard:
-    image: lancachenet/lancache-dashboard:latest
+    image: imahmud1/lancache-dashboard:latest
     container_name: lancache-dashboard
+    env_file: .env
     restart: always
     ports:
-      - "${LANCACHE_IP}:8080:80/tcp"
-    environment:
-      - TZ=Europe/Madrid
+      - "${LANCACHE_IP}:8080:3000/tcp"
     volumes:
-      - "${LOG_DIR}:/var/log/nginx"
+      - ${LOG_DIR}:/lancache/logs:ro
 EOF
 
-echo "--> Archivo de configuración actualizado con éxito."
+# Generar archivo .env con variables de bind obligatorias para el DNS y Dashboard
+sudo tee .env > /dev/null <<EOF
+LANCACHE_IP=${LANCACHE_IP}
+DNS_BIND_IP=${LANCACHE_IP}
+UPSTREAM_DNS=1.1.1.1 8.8.8.8
+CACHE_DISK_SIZE=${CACHE_DISK_SIZE}
+CACHE_INDEX_SIZE=250m
+CACHE_MAX_AGE=3650d
+TZ=Europe/Madrid
+EOF
+
+echo ""
+echo "======================================================="
+echo "=== PASO 5: DESPLIEGUE EN VIVO Y DESCARGA           ==="
+echo "======================================================="
+
+# Comando de orquestación moderno
+sudo docker compose up -d
+echo "--> Infraestructura de contenedores desplegada correctamente."
+
+echo ""
+echo "======================================================="
+echo "=== PASO 6: CONFIGURACIÓN PERSISTENTE DE IP EN ARCH ==="
+echo "======================================================="
+
+if systemctl is-active --quiet NetworkManager.service; then
+    echo "--> Aplicando configuración estática permanente en NetworkManager..."
+    NM_CONN=$(nmcli -t -f NAME,DEVICE connection show --active | grep ":${INTERFACE}$" | cut -d: -f1 | head -n1)
+    if [ -n "$NM_CONN" ]; then
+        # Se utiliza el operador '+' para AÑADIR la IP de LanCache como alias secundario permanente.
+        # Esto previene que se borre la IP de gestión original del servidor y evita la desconexión SSH.
+        sudo nmcli connection modify "$NM_CONN" +ipv4.addresses "${LANCACHE_IP}/24"
+        sudo nmcli connection modify "$NM_CONN" ipv4.dns "1.1.1.1 8.8.8.8"
+        echo "--> Configuración grabada en perfiles de NetworkManager (IP alias añadida)."
+    fi
+else
+    # Red nativa para Arch Linux simple
+    echo "--> Forzando configuración estática robusta en la arquitectura systemd-networkd..."
+    sudo mkdir -p /etc/systemd/network
+    
+    # El archivo .network declara explícitamente tanto la IP original del servidor 
+    # como la IP secundaria dedicada a LanCache, asegurando que ambas sobrevivan al reinicio.
+    sudo tee "/etc/systemd/network/10-lancache-static.network" > /dev/null <<EOF
+[Match]
+Name=${INTERFACE}
+
+[Network]
+Address=${CURRENT_IP}/24
+Address=${LANCACHE_IP}/24
+Gateway=${GATEWAY}
+DNS=1.1.1.1 8.8.8.8
+EOF
+    
+    # Apagar clientes DHCP antiguos que intenten pisar la red tras reiniciar
+    sudo systemctl stop dhcpcd.service > /dev/null 2>&1 || true
+    sudo systemctl disable dhcpcd.service > /dev/null 2>&1 || true
+    
+    sudo systemctl enable systemd-networkd.service > /dev/null 2>&1
+    
+    # Indicar a openresolv de forma nativa que no modifique el archivo resolv.conf bajo ningún concepto
+    echo "--> Bloqueando modificaciones de red sobre resolv.conf mediante openresolv..."
+    sudo mkdir -p /etc
+    sudo tee /etc/resolvconf.conf > /dev/null <<EOF
+# Configurado por LanCache Script
+resolvconf=NO
+EOF
+    
+    # Escribir el archivo estático definitivo accesible para Docker
+    sudo rm -f /etc/resolv.conf
+    cat <<EOF | sudo tee /etc/resolv.conf > /dev/null
+nameserver 1.1.1.1
+nameserver 8.8.8.8
+EOF
+    echo "--> Configuración estática y enrutamiento DNS completados de forma nativa."
+fi
+
 echo ""
 
 echo "======================================================="
-echo "=== PASO 2: REINICIANDO Y DESPLEGANDO LA INTERFAZ   ==="
+echo "===       ¡INSTALACIÓN COMPLETADA CON ÉXITO!        ==="
 echo "======================================================="
-
-# Actualizar el despliegue con la nueva GUI instalada
-echo "--> Recreando la pila de Docker con el nuevo panel integrado..."
-sudo docker compose up -d --remove-orphans
-
-echo ""
-echo "======================================================="
-echo "===       ¡GUI INSTALADA CORRECTAMENTE!             ==="
-echo "======================================================="
-echo " El panel gráfico está activo y analizando logs en vivo."
-echo " Puedes acceder desde cualquier navegador de tu red en:"
-echo " 👉 http://${LANCACHE_IP}:8080"
+echo " Servidor LanCache configurado en: ${LANCACHE_IP}"
+echo " IP de gestión SSH mantenida en: ${CURRENT_IP}"
+echo " Panel de Control (Dashboard): http://${LANCACHE_IP}:8080"
+echo " Tamaño de almacenamiento asignado: ${CACHE_DISK_SIZE}"
+echo " Carpeta de administración: /opt/lancache-docker"
+echo " Almacenamiento físico de descargas: ${DATA_DIR}"
+echo "-------------------------------------------------------"
+echo " IMPORTANTE: Para aplicar todos los cambios de la red"
+echo " estática de forma limpia y definitiva, debes reiniciar:"
+echo "                 'sudo reboot'"
 echo "======================================================="
