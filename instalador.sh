@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Evitar que el script continúe si ocurre cualquier error crítico
+# Evitar que el script continúe si ocurre cualquier error crítico preguntarle por "Script Instalador Todo en Uno: IP Estática + Alias + LanCache + Pi-hole"
 set -e
 
 echo "========================================================="
