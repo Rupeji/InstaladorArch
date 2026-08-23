@@ -150,8 +150,8 @@ services:
     env_file: .env
     restart: always
     ports:
-      - "${LANCACHE_IP}:53:53/udp"
-      - "${LANCACHE_IP}:53:53/tcp"
+      - "\${LANCACHE_IP}:53:53/udp"
+      - "\${LANCACHE_IP}:53:53/tcp"
 
   sniproxy:
     image: lancachenet/sniproxy:latest
@@ -159,7 +159,7 @@ services:
     env_file: .env
     restart: always
     ports:
-      - "${LANCACHE_IP}:443:443/tcp"
+      - "\${LANCACHE_IP}:443:443/tcp"
 
   monolithic:
     image: lancachenet/monolithic:latest
@@ -167,18 +167,18 @@ services:
     env_file: .env
     restart: always
     ports:
-      - "${LANCACHE_IP}:80:80/tcp"
+      - "\${LANCACHE_IP}:80:80/tcp"
     volumes:
       - ${DATA_DIR}:/data/cache
       - ${LOG_DIR}:/data/logs
 
   dashboard:
-    image: imahmud1/lancache-dashboard:latest
+    image: ninepiece2/ninelancacheui:latest
     container_name: lancache-dashboard
     env_file: .env
     restart: always
     ports:
-      - "${LANCACHE_IP}:8080:3000/tcp"
+      - "\${LANCACHE_IP}:8080:3000/tcp"
     volumes:
       - ${LOG_DIR}:/lancache/logs:ro
 EOF
@@ -199,8 +199,8 @@ echo "======================================================="
 echo "=== PASO 5: DESPLIEGUE EN VIVO Y DESCARGA           ==="
 echo "======================================================="
 
-# Descargar y levantar la estructura (Escucharán temporalmente hasta el reinicio de red)
-sudo docker compose up -d
+# Descargar y levantar utilizando de forma limpia y directa la sintaxis nativa de docker-compose
+sudo docker-compose up -d
 echo "--> Infraestructura de contenedores desplegada correctamente."
 
 echo ""
