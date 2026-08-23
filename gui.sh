@@ -3,7 +3,7 @@
 # Salir inmediatamente si un comando falla de forma imprevista
 set -e
 
-# Configuración de variables fijas solicitadas
+# Configuración de la IP fija global para el Servidor y LanCache
 LANCACHE_IP="192.168.0.7"
 
 echo "======================================================="
@@ -17,7 +17,6 @@ echo "--> Actualizando el sistema completo de Arch Linux (Pacman -Syu)..."
 sudo pacman -Syu --noconfirm
 
 echo "--> Instalando dependencias estructurales y binarios de red..."
-# Docker y su plugin CLI de compose se gestionan juntos de forma nativa en Arch
 sudo pacman -S --needed --noconfirm \
     docker \
     containerd \
@@ -76,8 +75,7 @@ while true; do
 done
 set -e
 
-# Uso de '--output=avail' para garantizar una salida numérica limpia en una sola línea, 
-# evitando que nombres de dispositivos largos (NVMe/LVM) dividan la salida de df y rompan la matemática.
+# Uso de '--output=avail' para garantizar una salida numérica limpia en una sola línea
 FREE_KB=$(df -k --output=avail "$BASE_DIR" | tail -n1 | tr -d ' ')
 FREE_GB=$(( FREE_KB / 1024 / 1024 ))
 
@@ -103,12 +101,11 @@ echo "======================================================="
 echo "=== PASO 3: CONTROL DE INTERFACES Y BLINDAJE DE RED  ==="
 echo "======================================================="
 
+# Detectar la interfaz física real conectada y su puerta de enlace (Gateway) actual
 INTERFACE=$(ip route | grep default | awk '{print $5}' | head -n1)
 GATEWAY=$(ip route | grep default | awk '{print $3}' | head -n1)
-# Captura la IP actual del servidor para asegurar la persistencia sin perder acceso SSH.
-CURRENT_IP=$(ip -o -4 addr show dev "$INTERFACE" | awk '{print $4}' | cut -d/ -f1 | head -n1)
 
-if [ -z "$INTERFACE" ] || [ -z "$GATEWAY" ] || [ -z "$CURRENT_IP" ]; then
+if [ -z "$INTERFACE" ] || [ -z "$GATEWAY" ]; then
     echo "¡Error crítico!: La máquina no dispone de una interfaz de red activa conectada a Internet."
     exit 1
 fi
@@ -116,23 +113,19 @@ fi
 # Desvincular cualquier archivo previo para evitar enlaces rotos de systemd-resolved
 sudo rm -f /etc/resolv.conf
 
-# BLINDAJE DE RESOLUCIÓN INTERNA: Forzar DNS estables de producción en el host
+# Configurar servidores DNS temporales para que Docker pueda descargar las imágenes sin problemas
 echo "--> Configurando servidores de nombres raíz temporales..."
 cat <<EOF | sudo tee /etc/resolv.conf > /dev/null
 nameserver 1.1.1.1
 nameserver 8.8.8.8
 EOF
 
-# DESACTIVAR TOTALMENTE systemd-resolved para liberar el puerto 53 en todas las IPs locales
+# DESACTIVAR TOTALMENTE systemd-resolved para liberar el puerto 53 en el host
 if systemctl is-active --quiet systemd-resolved.service || systemctl is-enabled --quiet systemd-resolved.service; then
     echo "--> Deteniendo y liberando puerto 53 de systemd-resolved..."
     sudo systemctl stop systemd-resolved.service || true
     sudo systemctl disable systemd-resolved.service || true
 fi
-
-# Levantar alias virtual secundario para la IP de LanCache (Protección SSH anti-desconexión masiva)
-echo "--> Asignando alias virtual a la interfaz principal (${LANCACHE_IP})...."
-sudo ip addr add ${LANCACHE_IP}/24 dev "$INTERFACE" label "${INTERFACE}:lancache" 2>/dev/null || true
 
 echo "--> Arrancando e inicializando el motor de Docker..."
 sudo systemctl enable --now containerd.service
@@ -147,7 +140,7 @@ echo "======================================================="
 echo "=== PASO 4: CREACIÓN DE INFRAESTRUCTURA LANCACHE    ==="
 echo "======================================================="
 
-# Generar docker-compose.yml nativo incluyendo lancache-dashboard
+# Generar docker-compose.yml mapeado de forma nativa a la IP estática definitiva
 sudo tee docker-compose.yml > /dev/null <<EOF
 services:
   dns:
@@ -189,7 +182,7 @@ services:
       - ${LOG_DIR}:/lancache/logs:ro
 EOF
 
-# Generar archivo .env con variables de bind obligatorias para el DNS y Dashboard
+# Generar archivo .env
 sudo tee .env > /dev/null <<EOF
 LANCACHE_IP=${LANCACHE_IP}
 DNS_BIND_IP=${LANCACHE_IP}
@@ -205,7 +198,7 @@ echo "======================================================="
 echo "=== PASO 5: DESPLIEGUE EN VIVO Y DESCARGA           ==="
 echo "======================================================="
 
-# Comando de orquestación moderno
+# Descargar y levantar la estructura (Escucharán temporalmente hasta el reinicio de red)
 sudo docker compose up -d
 echo "--> Infraestructura de contenedores desplegada correctamente."
 
@@ -214,70 +207,65 @@ echo "======================================================="
 echo "=== PASO 6: CONFIGURACIÓN PERSISTENTE DE IP EN ARCH ==="
 echo "======================================================="
 
+# Forzar de manera definitiva que la IP principal de ESTA máquina sea la 192.168.0.7
 if systemctl is-active --quiet NetworkManager.service; then
-    echo "--> Aplicando configuración estática permanente en NetworkManager..."
+    echo "--> Aplicando IP estática fija 192.168.0.7 en NetworkManager..."
     NM_CONN=$(nmcli -t -f NAME,DEVICE connection show --active | grep ":${INTERFACE}$" | cut -d: -f1 | head -n1)
     if [ -n "$NM_CONN" ]; then
-        # Se utiliza el operador '+' para AÑADIR la IP de LanCache como alias secundario permanente.
-        # Esto previene que se borre la IP de gestión original del servidor y evita la desconexión SSH.
-        sudo nmcli connection modify "$NM_CONN" +ipv4.addresses "${LANCACHE_IP}/24"
+        sudo nmcli connection modify "$NM_CONN" ipv4.addresses "${LANCACHE_IP}/24"
+        sudo nmcli connection modify "$NM_CONN" ipv4.gateway "$GATEWAY"
         sudo nmcli connection modify "$NM_CONN" ipv4.dns "1.1.1.1 8.8.8.8"
-        echo "--> Configuración grabada en perfiles de NetworkManager (IP alias añadida)."
+        sudo nmcli connection modify "$NM_CONN" ipv4.method manual
+        echo "--> Configuración grabada. La IP del servidor cambiará al reiniciar."
     fi
 else
-    # Red nativa para Arch Linux simple
-    echo "--> Forzando configuración estática robusta en la arquitectura systemd-networkd..."
+    echo "--> Configurando IP estática fija 192.168.0.7 en systemd-networkd..."
     sudo mkdir -p /etc/systemd/network
     
-    # El archivo .network declara explícitamente tanto la IP original del servidor 
-    # como la IP secundaria dedicada a LanCache, asegurando que ambas sobrevivan al reinicio.
+    # Se sobrescribe el adaptador para que la IP del propio sistema operativo sea de verdad la .7
     sudo tee "/etc/systemd/network/10-lancache-static.network" > /dev/null <<EOF
 [Match]
 Name=${INTERFACE}
 
 [Network]
-Address=${CURRENT_IP}/24
 Address=${LANCACHE_IP}/24
 Gateway=${GATEWAY}
 DNS=1.1.1.1 8.8.8.8
 EOF
     
-    # Apagar clientes DHCP antiguos que intenten pisar la red tras reiniciar
     sudo systemctl stop dhcpcd.service > /dev/null 2>&1 || true
     sudo systemctl disable dhcpcd.service > /dev/null 2>&1 || true
-    
     sudo systemctl enable systemd-networkd.service > /dev/null 2>&1
     
-    # Indicar a openresolv de forma nativa que no modifique el archivo resolv.conf bajo ningún concepto
-    echo "--> Bloqueando modificaciones de red sobre resolv.conf mediante openresolv..."
+    # Evitar que openresolv destruya el resolv.conf
     sudo mkdir -p /etc
     sudo tee /etc/resolvconf.conf > /dev/null <<EOF
 # Configurado por LanCache Script
 resolvconf=NO
 EOF
     
-    # Escribir el archivo estático definitivo accesible para Docker
     sudo rm -f /etc/resolv.conf
     cat <<EOF | sudo tee /etc/resolv.conf > /dev/null
 nameserver 1.1.1.1
 nameserver 8.8.8.8
 EOF
-    echo "--> Configuración estática y enrutamiento DNS completados de forma nativa."
+    echo "--> Configuración de red estática completada."
 fi
 
 echo ""
-
 echo "======================================================="
 echo "===       ¡INSTALACIÓN COMPLETADA CON ÉXITO!        ==="
 echo "======================================================="
-echo " Servidor LanCache configurado en: ${LANCACHE_IP}"
-echo " IP de gestión SSH mantenida en: ${CURRENT_IP}"
-echo " Panel de Control (Dashboard): http://${LANCACHE_IP}:8080"
+echo " Tu servidor Arch Linux ahora se fijará en: ${LANCACHE_IP}"
+echo " Acceso al Dashboard desde tu red: http://${LANCACHE_IP}:8080"
 echo " Tamaño de almacenamiento asignado: ${CACHE_DISK_SIZE}"
 echo " Carpeta de administración: /opt/lancache-docker"
-echo " Almacenamiento físico de descargas: ${DATA_DIR}"
 echo "-------------------------------------------------------"
-echo " IMPORTANTE: Para aplicar todos los cambios de la red"
-echo " estática de forma limpia y definitiva, debes reiniciar:"
+echo " ¡¡ATENCIÓN PREVIO AL REINICIO!!:"
+echo " Al reiniciar, perderás tu IP actual de SSH."
+echo " Deberás volver a conectarte usando la nueva IP:"
+echo "                 ssh usuario@192.168.0.7"
+echo ""
+echo " Ejecuta el reinicio definitivo ahora mismo:"
 echo "                 'sudo reboot'"
 echo "======================================================="
