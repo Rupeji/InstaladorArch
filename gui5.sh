@@ -141,7 +141,7 @@ echo "======================================================="
 echo "=== PASO 4: CREACIÓN DE INFRAESTRUCTURA LANCACHE    ==="
 echo "======================================================="
 
-# Generación del archivo docker-compose con la nueva IP 192.168.0.20
+# Generación del archivo docker-compose mapeado estrictamente a la IP física
 sudo tee docker-compose.yml > /dev/null <<EOF
 services:
   dns:
@@ -198,10 +198,10 @@ services:
       - AllowedHosts=*
 EOF
 
-# DNS_BIND_IP configurado en 0.0.0.0 para que escuche internamente en todas las interfaces de Docker
+# CORREGIDO: DNS_BIND_IP cambiado a la IP física para evitar el bucle de reinicios en 0.0.0.0 y liberar localhost
 sudo tee .env > /dev/null <<EOF
 LANCACHE_IP=${LANCACHE_IP}
-DNS_BIND_IP=0.0.0.0
+DNS_BIND_IP=${LANCACHE_IP}
 UPSTREAM_DNS=1.1.1.1 8.8.8.8
 CACHE_DISK_SIZE=${CACHE_DISK_SIZE}
 CACHE_INDEX_SIZE=250m
@@ -230,10 +230,11 @@ sudo tee /etc/resolvconf.conf > /dev/null <<EOF
 resolvconf=NO
 EOF
 
-# Apuntar el host a sí mismo para usar la resolución local de LanCache (necesario puerto 53 libre)
+# Apuntar el host a sí mismo + DNS de respaldo externo para evitar fallos de resolución circulares
 sudo rm -f /etc/resolv.conf
 cat <<EOF | sudo tee /etc/resolv.conf > /dev/null
 nameserver 127.0.0.1
+nameserver 1.1.1.1
 EOF
 
 echo ""
