@@ -131,7 +131,7 @@ if [ ! -b "/dev/$DISK_NAME" ]; then
 fi
 
 MOUNT_POINT="/mnt/lancache"
-mkdir -p "$MOUNT_POINT"
+sudo mkdir -p "$MOUNT_POINT"
 
 # Forzar la lectura de UUID y TYPE con sudo o lsblk como respaldo
 DISK_UUID=$(sudo blkid -o value -s UUID "/dev/$DISK_NAME")
@@ -156,12 +156,11 @@ if [ -n "$CURRENT_MOUNT" ] && [ "$CURRENT_MOUNT" != "$MOUNT_POINT" ]; then
     sudo umount -l "$CURRENT_MOUNT" || true
 fi
 
-# LIMPIAR CONFIGURACIONES PREVIAS EN FSTAB (Evita duplicados rotos)
-# Borra cualquier línea vieja que contenga el UUID o el punto de montaje deseado
+# LIMPIAR CONFIGURACIONES PREVIAS EN FSTAB
 sudo sed -i "\|UUID=$DISK_UUID|d" /etc/fstab
 sudo sed -i "\|$MOUNT_POINT|d" /etc/fstab
 
-# Escribir la nueva configuración limpia
+# Escribir la nueva configuración limpia óptima para Linux (ext4/xfs)
 echo "UUID=$DISK_UUID $MOUNT_POINT $FS_TYPE defaults,noatime,nofail 0 2" | sudo tee -a /etc/fstab
 
 echo "[-] Montando la unidad de almacenamiento en su ubicación final..."
@@ -176,14 +175,25 @@ if ! mountpoint -q "$MOUNT_POINT"; then
     fi
 fi
 
+# AJUSTAR PROPIEDAD DE LA RAÍZ DEL DISCO MONTAJE (Vital para formatos Linux)
+# Asegura que el usuario actual y Docker puedan gestionar la estructura interna
+sudo chown -R $USER:$USER "$MOUNT_POINT"
+
 CACHE_DATA_DIR="$MOUNT_POINT/data"
 CACHE_LOGS_DIR="$MOUNT_POINT/logs"
 PIHOLE_DATA_DIR="/opt/pihole/config"
 PIHOLE_DNS_DIR="/opt/pihole/dnsmasq.d"
 
-sudo mkdir -p "$CACHE_DATA_DIR" "$CACHE_LOGS_DIR" "$PIHOLE_DATA_DIR" "$PIHOLE_DNS_DIR"
-sudo chmod -R 777 "$CACHE_DATA_DIR" "$CACHE_LOGS_DIR"
-echo "[+] Almacenamiento preparado y verificado en $MOUNT_POINT."
+# Crear directorios con la estructura correcta
+mkdir -p "$CACHE_DATA_DIR" "$CACHE_LOGS_DIR"
+sudo mkdir -p "$PIHOLE_DATA_DIR" "$PIHOLE_DNS_DIR"
+
+# Asignar permisos globales para los contenedores de Lancache
+chmod -R 777 "$CACHE_DATA_DIR" "$CACHE_LOGS_DIR"
+sudo chmod -R 777 "/opt/pihole"
+
+echo "[+] Almacenamiento Linux preparado, montado y con permisos verificados en $MOUNT_POINT."
+
 
 # ==========================================
 # 5. CREACIÓN DEL ESCENARIO DOCKER COMPOSE
