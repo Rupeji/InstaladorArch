@@ -123,7 +123,7 @@ echo "[?] Discos de almacenamiento disponibles:"
 echo "---------------------------------------------------------"
 lsblk -n -o NAME,SIZE,FSTYPE,MODEL
 echo "---------------------------------------------------------"
-read -p "[>] Escribe el nombre exacto de la partición para los juegos (ej. sdb1): " DISK_NAME
+read -p "[>] Escribe el nombre exacto de la partición para los juegos (ej. sda1): " DISK_NAME
 
 if [ ! -b "/dev/$DISK_NAME" ]; then
     echo "[!] El dispositivo /dev/$DISK_NAME no existe."
@@ -133,23 +133,47 @@ fi
 MOUNT_POINT="/mnt/lancache"
 mkdir -p "$MOUNT_POINT"
 
-DISK_UUID=$(blkid -o value -s UUID "/dev/$DISK_NAME")
-FS_TYPE=$(blkid -o value -s TYPE "/dev/$DISK_NAME")
+# Forzar la lectura de UUID y TYPE con sudo o lsblk como respaldo
+DISK_UUID=$(sudo blkid -o value -s UUID "/dev/$DISK_NAME")
+FS_TYPE=$(sudo blkid -o value -s TYPE "/dev/$DISK_NAME")
 
 if [ -z "$DISK_UUID" ] || [ -z "$FS_TYPE" ]; then
-    echo "[!] No se pudo leer un sistema de archivos válido en la partición."
+    DISK_UUID=$(lsblk -no UUID "/dev/$DISK_NAME")
+    FS_TYPE=$(lsblk -no FSTYPE "/dev/$DISK_NAME")
+fi
+
+if [ -z "$DISK_UUID" ] || [ -z "$FS_TYPE" ]; then
+    echo "[!] No se pudo leer un sistema de archivos válido en la partición /dev/$DISK_NAME."
     exit 1
 fi
 
-if ! grep -q "$DISK_UUID" /etc/fstab; then
-    echo "UUID=$DISK_UUID $MOUNT_POINT $FS_TYPE defaults,noatime 0 2" >> /etc/fstab
+# DETECTAR SI YA ESTÁ MONTADO EN OTRO LUGAR
+CURRENT_MOUNT=$(lsblk -no MOUNTPOINT "/dev/$DISK_NAME" | head -n 1)
+
+if [ -n "$CURRENT_MOUNT" ] && [ "$CURRENT_MOUNT" != "$MOUNT_POINT" ]; then
+    echo "[-] El disco ya está montado en: $CURRENT_MOUNT"
+    echo "[-] Desmontando de forma segura para reasignarlo a $MOUNT_POINT..."
+    sudo umount -l "$CURRENT_MOUNT" || true
 fi
 
-echo "[-] Montando la unidad de almacenamiento..."
-mount -a || true
-if ! mount | grep -q "$MOUNT_POINT"; then
-    echo "[!] Error crítico: La unidad no se pudo montar."
-    exit 1
+# LIMPIAR CONFIGURACIONES PREVIAS EN FSTAB (Evita duplicados rotos)
+# Borra cualquier línea vieja que contenga el UUID o el punto de montaje deseado
+sudo sed -i "\|UUID=$DISK_UUID|d" /etc/fstab
+sudo sed -i "\|$MOUNT_POINT|d" /etc/fstab
+
+# Escribir la nueva configuración limpia
+echo "UUID=$DISK_UUID $MOUNT_POINT $FS_TYPE defaults,noatime,nofail 0 2" | sudo tee -a /etc/fstab
+
+echo "[-] Montando la unidad de almacenamiento en su ubicación final..."
+sudo mount -a || true
+
+# Verificación definitiva de montaje activo
+if ! mountpoint -q "$MOUNT_POINT"; then
+    sudo mount "/dev/$DISK_NAME" "$MOUNT_POINT" || true
+    if ! mountpoint -q "$MOUNT_POINT"; then
+        echo "[!] Error crítico: La unidad no se pudo montar en $MOUNT_POINT."
+        exit 1
+    fi
 fi
 
 CACHE_DATA_DIR="$MOUNT_POINT/data"
@@ -157,8 +181,9 @@ CACHE_LOGS_DIR="$MOUNT_POINT/logs"
 PIHOLE_DATA_DIR="/opt/pihole/config"
 PIHOLE_DNS_DIR="/opt/pihole/dnsmasq.d"
 
-mkdir -p "$CACHE_DATA_DIR" "$CACHE_LOGS_DIR" "$PIHOLE_DATA_DIR" "$PIHOLE_DNS_DIR"
-chmod -R 777 "$CACHE_DATA_DIR" "$CACHE_LOGS_DIR"
+sudo mkdir -p "$CACHE_DATA_DIR" "$CACHE_LOGS_DIR" "$PIHOLE_DATA_DIR" "$PIHOLE_DNS_DIR"
+sudo chmod -R 777 "$CACHE_DATA_DIR" "$CACHE_LOGS_DIR"
+echo "[+] Almacenamiento preparado y verificado en $MOUNT_POINT."
 
 # ==========================================
 # 5. CREACIÓN DEL ESCENARIO DOCKER COMPOSE
