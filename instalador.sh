@@ -215,7 +215,7 @@ echo "======================================================="
 echo "=== PASO 5: DESPLIEGUE EN VIVO Y DESCARGA           ==="
 echo "======================================================="
 
-sudo docker compose up -d
+sudo docker compose up --detach
 echo "--> Infraestructura de contenedores desplegada correctamente."
 
 echo ""
